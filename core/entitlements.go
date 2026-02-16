@@ -32,30 +32,4 @@ func DumpEntitlements(binaryPath string) (map[string]interface{}, error) {
 	return entitlements, nil
 }
 
-// CheckEntitlements analyzes entitlements for risks
-func CheckEntitlements(entitlements map[string]interface{}) []string {
-	var findings []string
-
-	// Check 1: Debuggable
-	if val, ok := entitlements["get-task-allow"]; ok {
-		if boolVal, ok := val.(bool); ok && boolVal {
-			findings = append(findings, "get-task-allow: true (App is debuggable - Critical for Production)")
-		}
-	}
-
-	// Check 2: Sandbox
-	if _, ok := entitlements["com.apple.security.app-sandbox"]; !ok {
-		// Does unrelated to iOS? iOS apps are always sandboxed?
-		// Usually provisioning profile dictates this.
-		// findings = append(findings, "com.apple.security.app-sandbox: missing")
-		// Actually typical iOS app entitlements might not explicitly list it if it's default?
-		// Let's stick to known risky ones.
-	}
-
-	// Check 3: APS Environment
-	if val, ok := entitlements["aps-environment"]; ok {
-		findings = append(findings, fmt.Sprintf("Push Notifications (aps-environment): %v", val))
-	}
-
-	return findings
-}
+// CheckEntitlements -> redundant, logic moved to recon.go analyzeEntitlements

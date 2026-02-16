@@ -116,7 +116,48 @@ like URLs, API keys, emails, and IP addresses.`,
 			os.Exit(1)
 		}
 
-		// 4. Report
+		// 4. Ghidra Analysis (Optional)
+		ghidraPath, _ := cmd.Flags().GetString("ghidra-path")
+		if ghidraPath != "" {
+			fmt.Printf("[*] Ghidra path provided. Starting Advanced Static Analysis...\n")
+
+			// Locate script (assuming existing in assets/ for dev)
+			// in prod, we might need to look relative to binary or embedded
+			cwd, _ := os.Getwd()
+			scriptPath := filepath.Join(cwd, "assets", core.GHIDRA_SCRIPT)
+
+			// If not found, check if it's in the same dir as binary (deployment)
+			if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+				// Try looking in executable dir
+				ex, err := os.Executable()
+				if err == nil {
+					scriptPath = filepath.Join(filepath.Dir(ex), "assets", core.GHIDRA_SCRIPT)
+				}
+			}
+
+			if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+				fmt.Printf("[!] Could not locate Ghidra script %s. Skipping Ghidra analysis.\n", core.GHIDRA_SCRIPT)
+			} else {
+				findings, err := core.RunGhidraAnalysis(target.BinaryPath, ghidraPath, scriptPath)
+				if err != nil {
+					fmt.Printf("[!] Ghidra analysis failed: %v\n", err)
+				} else {
+					fmt.Printf("[+] Ghidra analysis completed. Found %d issues.\n", len(findings))
+					for _, f := range findings {
+						target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, core.Finding{
+							Title:       "Ghidra Detected: " + f.Vulnerability,
+							Description: f.Description,
+							FilePath:    filepath.Base(target.BinaryPath),
+							LineNumber:  0,
+							Snippet:     fmt.Sprintf("Caller: %s @ %s", f.Caller, f.Address),
+							Value:       f.Vulnerability,
+						})
+					}
+				}
+			}
+		}
+
+		// 5. Report
 		// Save JSON report always
 		jsonPath := filepath.Join(target.WorkDir, "report.json")
 		if err := target.Report.SaveJSON(jsonPath); err != nil {
@@ -151,4 +192,5 @@ like URLs, API keys, emails, and IP addresses.`,
 func init() {
 	rootCmd.AddCommand(reconCmd)
 	reconCmd.Flags().StringP("output", "o", "", "Output report to file (Markdown)")
+	reconCmd.Flags().String("ghidra-path", "", "Path to Ghidra installation root (for advanced analysis)")
 }

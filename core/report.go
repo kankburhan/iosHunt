@@ -29,28 +29,60 @@ type Report struct {
 	Entitlements   map[string]interface{} `json:"entitlements"`
 
 	Findings struct {
-		Secrets           []string `json:"secrets"`
-		URLs              []string `json:"urls"`
-		Emails            []string `json:"emails"`
-		IPs               []string `json:"ips"`
-		Misconfigurations []string `json:"misconfigurations"`
-		Obfuscation       []string `json:"obfuscation"`
+		Secrets           []Finding `json:"secrets"`
+		URLs              []string  `json:"urls"` // URLs can remain simple for now or upgrade? Let's keep simple or upgrade later.
+		Emails            []string  `json:"emails"`
+		IPs               []string  `json:"ips"`
+		Misconfigurations []string  `json:"misconfigurations"` // Misconfigs usually don't have file/line in same way (plist)
+		Obfuscation       []string  `json:"obfuscation"`
+
+		// Phase 15 New Categories - Upgraded to Finding in Phase 16
+		Trackers        []string  `json:"trackers"`         // Trackers are usually just presence, keep as string?
+		HardeningIssues []Finding `json:"hardening_issues"` // Upgraded
+		Permissions     []string  `json:"permissions"`      // Plist based, keep string
+		InsecureStorage []Finding `json:"insecure_storage"` // Upgraded
+		CryptoIssues    []Finding `json:"crypto_issues"`    // Upgraded
+		CodeIssues      []Finding `json:"code_issues"`      // Phase 18: Injection/Vulns
+
+		// Phase 23: Deep Links
+		DeepLinks struct {
+			Schemes   []string `json:"schemes"`
+			Universal []string `json:"universal_links"`
+		} `json:"deep_links"`
 	} `json:"findings"`
+}
+
+// Finding represents a vulnerability or interesting artifact with context
+type Finding struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	FilePath    string `json:"file_path"`
+	LineNumber  int    `json:"line_number,omitempty"`
+	Snippet     string `json:"snippet,omitempty"`
+	Value       string `json:"value,omitempty"` // The specific secret string
+	// Severity    string `json:"severity,omitempty"` // Future
 }
 
 func NewReport(target string) *Report {
 	r := &Report{}
 	r.Meta.Tool = "iOSHunt"
-	r.Meta.Version = "v2.0"
+	r.Meta.Version = "v1.11.0"
 	r.Meta.Target = target
 	r.Meta.Timestamp = "TODO: Current Time" // Set time in target creation or here
 	// Initialize slices to avoid null in JSON
-	r.Findings.Secrets = []string{}
+	// Initialize slices to avoid null in JSON
+	r.Findings.Secrets = []Finding{}
 	r.Findings.URLs = []string{}
 	r.Findings.Emails = []string{}
 	r.Findings.IPs = []string{}
 	r.Findings.Misconfigurations = []string{}
 	r.Findings.Obfuscation = []string{}
+	r.Findings.Trackers = []string{}
+	r.Findings.Permissions = []string{}
+	r.Findings.HardeningIssues = []Finding{}
+	r.Findings.InsecureStorage = []Finding{}
+	r.Findings.CryptoIssues = []Finding{}
+	r.Findings.CodeIssues = []Finding{}
 	return r
 }
 
@@ -109,34 +141,109 @@ func (r *Report) SaveMarkdown(path string) error {
 		fmt.Fprintf(f, "```\n\n")
 	}
 
-	// Secrets (Limit output?)
+	// Secrets
 	if len(r.Findings.Secrets) > 0 {
 		fmt.Fprintf(f, "## Identified Secrets (%d)\n", len(r.Findings.Secrets))
-		count := 0
-		for _, s := range r.Findings.Secrets {
-			if count > 50 {
-				fmt.Fprintf(f, "- ... and %d more\n", len(r.Findings.Secrets)-50)
+		for i, s := range r.Findings.Secrets {
+			if i > 50 {
 				break
 			}
-			fmt.Fprintf(f, "- `%s`\n", s)
-			count++
+			fmt.Fprintf(f, "- **%s** in `%s:%d`\n", s.Title, s.FilePath, s.LineNumber)
+			if s.Value != "" {
+				fmt.Fprintf(f, "  > **Value:** `%s`\n", s.Value)
+			}
+			fmt.Fprintf(f, "  > Snippet: `%s`\n", s.Snippet)
 		}
 		fmt.Fprintf(f, "\n")
 	}
 
-	// URLs (Limit output?)
+	// URLs
 	if len(r.Findings.URLs) > 0 {
 		fmt.Fprintf(f, "## Extracted URLs (%d)\n", len(r.Findings.URLs))
-		count := 0
-		for _, u := range r.Findings.URLs {
-			if count > 50 {
-				fmt.Fprintf(f, "- ... and %d more\n", len(r.Findings.URLs)-50)
+		for i, u := range r.Findings.URLs {
+			if i > 50 {
 				break
 			}
 			fmt.Fprintf(f, "- %s\n", u)
-			count++
 		}
 		fmt.Fprintf(f, "\n")
+	}
+
+	// Permissions
+	if len(r.Findings.Permissions) > 0 {
+		fmt.Fprintf(f, "## Permissions\n")
+		for _, p := range r.Findings.Permissions {
+			fmt.Fprintf(f, "- %s\n", p)
+		}
+		fmt.Fprintf(f, "\n")
+	}
+
+	// Insecure Storage
+	if len(r.Findings.InsecureStorage) > 0 {
+		fmt.Fprintf(f, "## Insecure Storage Indicators\n")
+		for _, i := range r.Findings.InsecureStorage {
+			fmt.Fprintf(f, "- [!] **%s** in `%s:%d`\n", i.Title, i.FilePath, i.LineNumber)
+			fmt.Fprintf(f, "  > `%s`\n", i.Snippet)
+		}
+		fmt.Fprintf(f, "\n")
+	}
+
+	// Code Injection / Vulnerabilities (Phase 18)
+	if len(r.Findings.CodeIssues) > 0 {
+		fmt.Fprintf(f, "## Code Injection & Vulnerabilities\n")
+		for _, c := range r.Findings.CodeIssues {
+			fmt.Fprintf(f, "- [!!!] **%s** in `%s:%d`\n", c.Title, c.FilePath, c.LineNumber)
+			fmt.Fprintf(f, "  > `%s`\n", c.Snippet)
+		}
+		fmt.Fprintf(f, "\n")
+	}
+
+	// Crypto Issues
+	if len(r.Findings.CryptoIssues) > 0 {
+		fmt.Fprintf(f, "## Weak Cryptography\n")
+		for _, c := range r.Findings.CryptoIssues {
+			fmt.Fprintf(f, "- [!] **%s** in `%s:%d`\n", c.Title, c.FilePath, c.LineNumber)
+			fmt.Fprintf(f, "  > `%s`\n", c.Snippet)
+		}
+		fmt.Fprintf(f, "\n")
+	}
+
+	// Hardening Issues
+	if len(r.Findings.HardeningIssues) > 0 {
+		fmt.Fprintf(f, "## Hardening / Security Gaps\n")
+		for _, h := range r.Findings.HardeningIssues {
+			fmt.Fprintf(f, "- **%s** in `%s:%d`\n", h.Title, h.FilePath, h.LineNumber)
+			fmt.Fprintf(f, "  > `%s`\n", h.Snippet)
+		}
+		fmt.Fprintf(f, "\n")
+	}
+
+	// Trackers
+	if len(r.Findings.Trackers) > 0 {
+		fmt.Fprintf(f, "## Detected SDKs & Trackers\n")
+		for _, t := range r.Findings.Trackers {
+			fmt.Fprintf(f, "- %s\n", t)
+		}
+		fmt.Fprintf(f, "\n")
+	}
+
+	// Deep Links (Phase 23)
+	if len(r.Findings.DeepLinks.Schemes) > 0 || len(r.Findings.DeepLinks.Universal) > 0 {
+		fmt.Fprintf(f, "## Deep Links & Entry Points\n")
+		if len(r.Findings.DeepLinks.Schemes) > 0 {
+			fmt.Fprintf(f, "### Custom URL Schemes\n")
+			for _, s := range r.Findings.DeepLinks.Schemes {
+				fmt.Fprintf(f, "- `%s://`\n", s)
+			}
+			fmt.Fprintf(f, "\n")
+		}
+		if len(r.Findings.DeepLinks.Universal) > 0 {
+			fmt.Fprintf(f, "### Universal Links (Associated Domains)\n")
+			for _, u := range r.Findings.DeepLinks.Universal {
+				fmt.Fprintf(f, "- `%s`\n", u)
+			}
+			fmt.Fprintf(f, "\n")
+		}
 	}
 
 	return nil
@@ -174,6 +281,7 @@ const htmlTemplate = `
         .value { font-size: 1.1em; }
         .finding { padding: 8px 12px; margin-bottom: 5px; background: #fff3cd; border-left: 4px solid #ffc107; border-radius: 2px; }
         .finding.risk { background: #f8d7da; border-left: 4px solid #dc3545; color: #721c24; }
+        .finding.critical { background: #f5c6cb; border-left: 4px solid #721c24; color: #721c24; font-weight: bold; }
         .finding.secure { background: #d4edda; border-left: 4px solid #28a745; color: #155724; }
         .code-block { background: #2d2d2d; color: #f8f8f2; padding: 15px; border-radius: 4px; overflow-x: auto; font-family: monospace; }
         ul { list-style-type: none; padding: 0; }
@@ -216,7 +324,10 @@ const htmlTemplate = `
         <h2>Identified Secrets ({{len .Findings.Secrets}})</h2>
         <ul>
             {{range .Findings.Secrets}}
-            <li><code>{{.}}</code></li>
+            <li>
+                <strong>{{.Title}}</strong> in <code>{{.FilePath}}:{{.LineNumber}}</code><br>
+                <div class="code-block" style="padding:5px; margin-top:5px; font-size:0.9em;">{{.Snippet}}</div>
+            </li>
             {{end}}
         </ul>
         {{end}}
@@ -236,6 +347,67 @@ const htmlTemplate = `
             </ul>
         </div>
         {{end}}
+
+        <!-- Phase 15 Sections -->
+        
+        {{if .Findings.Permissions}}
+        <h2>Permissions</h2>
+        <ul>
+            {{range .Findings.Permissions}}
+            <li>{{.}}</li>
+            {{end}}
+        </ul>
+        {{end}}
+
+        {{if .Findings.InsecureStorage}}
+        <h2>Insecure Storage Indicators</h2>
+        {{range .Findings.InsecureStorage}}
+            <div class="finding risk">
+                <strong>{{.Title}}</strong> - {{.FilePath}}:{{.LineNumber}}<br>
+                <code style="display:block; margin-top:5px; color:#555;">{{.Snippet}}</code>
+            </div>
+        {{end}}
+        {{end}}
+
+        {{if .Findings.CodeIssues}}
+        <h2>Code Injection & Vulnerabilities</h2>
+        {{range .Findings.CodeIssues}}
+            <div class="finding critical">
+                <strong>{{.Title}}</strong> - {{.FilePath}}:{{.LineNumber}}<br>
+                <code style="display:block; margin-top:5px; color:#555;">{{.Snippet}}</code>
+            </div>
+        {{end}}
+        {{end}}
+
+        {{if .Findings.CryptoIssues}}
+        <h2>Weak Cryptography</h2>
+        {{range .Findings.CryptoIssues}}
+            <div class="finding risk">
+                <strong>{{.Title}}</strong> - {{.FilePath}}:{{.LineNumber}}<br>
+                <code style="display:block; margin-top:5px; color:#555;">{{.Snippet}}</code>
+            </div>
+        {{end}}
+        {{end}}
+
+        {{if .Findings.HardeningIssues}}
+        <h2>Hardening & Security Gaps</h2>
+        {{range .Findings.HardeningIssues}}
+            <div class="finding">
+                <strong>{{.Title}}</strong> - {{.FilePath}}:{{.LineNumber}}<br>
+                <code style="display:block; margin-top:5px; color:#555;">{{.Snippet}}</code>
+            </div>
+        {{end}}
+        {{end}}
+
+        {{if .Findings.Trackers}}
+        <h2>Detected SDKs & Trackers</h2>
+        <ul>
+            {{range .Findings.Trackers}}
+            <li><span class="tag false">{{.}}</span></li>
+            {{end}}
+        </ul>
+        {{end}}
+
     </div>
 </body>
 </html>
