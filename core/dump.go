@@ -8,8 +8,10 @@ import (
 type DumpType string
 
 const (
-	DumpKeychain     DumpType = "keychain"
-	DumpUserDefaults DumpType = "userdefaults" // Future
+	DumpKeychain DumpType = "keychain"
+	DumpDefaults DumpType = "defaults"
+	DumpCookies  DumpType = "cookies"
+	DumpAppInfo  DumpType = "app_info"
 )
 
 // DumpData attaches to the app and runs the specific dump script
@@ -17,7 +19,13 @@ func DumpData(bundleID string, dumpType DumpType) error {
 	var scriptName string
 	switch dumpType {
 	case DumpKeychain:
-		scriptName = "keychain.js"
+		scriptName = "keychain_dump.js"
+	case DumpDefaults:
+		scriptName = "defaults_dump.js"
+	case DumpCookies:
+		scriptName = "cookies_dump.js"
+	case DumpAppInfo:
+		scriptName = "app_info.js"
 	default:
 		return fmt.Errorf("unsupported dump type: %s", dumpType)
 	}

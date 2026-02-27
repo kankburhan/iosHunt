@@ -20,6 +20,15 @@ var attachCmd = &cobra.Command{
 
 func runAttach(cmd *cobra.Command, args []string) {
 	processName := args[0]
+
+	// Auto-detect device
+	device, err := core.GetConnectedDevice()
+	if err != nil {
+		fmt.Printf("[!] Warning: %v. Assuming remote/TCP or relying on Frida's auto-detection.\n", err)
+	} else {
+		fmt.Printf("[*] Detected USB Device: %s (%s)\n", device.Name, device.ID)
+	}
+
 	fmt.Printf("[*] Attaching to process: %s\n", processName)
 
 	var scripts []string
@@ -70,19 +79,43 @@ func runAttach(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// NEW FEATURE: URL Scheme Security Monitor
+	if urlScheme, _ := cmd.Flags().GetBool("url-scheme-monitor"); urlScheme {
+		if p, err := core.GetAssetScript("url_scheme_monitor.js"); err == nil {
+			fmt.Println("[*] Loading URL Scheme Security Monitor")
+			scripts = append(scripts, p)
+		}
+	}
+
+	// NEW FEATURE: NSCoding Security Monitor
+	if nscoding, _ := cmd.Flags().GetBool("nscoding-monitor"); nscoding {
+		if p, err := core.GetAssetScript("nscoding_monitor.js"); err == nil {
+			fmt.Println("[*] Loading NSCoding Deserialization Monitor")
+			scripts = append(scripts, p)
+		}
+	}
+
+	// NEW FEATURE: Keychain Security Monitor
+	if keychain, _ := cmd.Flags().GetBool("keychain-monitor"); keychain {
+		if p, err := core.GetAssetScript("keychain_security_monitor.js"); err == nil {
+			fmt.Println("[*] Loading Keychain Security Monitor")
+			scripts = append(scripts, p)
+		}
+	}
+
 	if pluginName, _ := cmd.Flags().GetString("plugin"); pluginName != "" {
 		home, _ := os.UserHomeDir()
 		pluginPath := filepath.Join(home, ".ioshunt", "plugins", pluginName)
-		content, err := os.ReadFile(pluginPath)
-		if err == nil {
-			scripts = append(scripts, string(content))
+
+		// Check if exists directly
+		if _, err := os.Stat(pluginPath); err == nil {
+			scripts = append(scripts, pluginPath)
 			fmt.Printf("[+] Loaded plugin: %s\n", pluginName)
 		} else {
 			// Try append .js
 			pluginPath += ".js"
-			content, err := os.ReadFile(pluginPath)
-			if err == nil {
-				scripts = append(scripts, string(content))
+			if _, err := os.Stat(pluginPath); err == nil {
+				scripts = append(scripts, pluginPath)
 				fmt.Printf("[+] Loaded plugin: %s\n", pluginName)
 			} else {
 				fmt.Printf("[!] Plugin not found: %s\n", pluginName)
@@ -107,5 +140,8 @@ func init() {
 	attachCmd.Flags().Bool("crypto", false, "Load Crypto Monitor (Phase 9)")
 	attachCmd.Flags().Bool("bypass", false, "Load Universal Bypass (Phase 9)")
 	attachCmd.Flags().Bool("headers", false, "Load Header Logger (Phase 9)")
+	attachCmd.Flags().Bool("url-scheme-monitor", false, "Load URL Scheme Security Monitor (NEW)")
+	attachCmd.Flags().Bool("nscoding-monitor", false, "Load NSCoding Deserialization Monitor (NEW)")
+	attachCmd.Flags().Bool("keychain-monitor", false, "Load Keychain Security Monitor (NEW)")
 	attachCmd.Flags().String("plugin", "", "Load a plugin script by name")
 }

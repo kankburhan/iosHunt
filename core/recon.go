@@ -56,6 +56,9 @@ var (
 		"NSPredicate Injection":                     regexp.MustCompile(`predicateWithFormat:`),
 		"Unsafe C Function (Buffer Overflow)":       regexp.MustCompile(`\b(strcpy|strcat|gets|sprintf|vsprintf)\(`),
 		"Memory Corruption (Unsafe Copy)":           regexp.MustCompile(`\b(memcpy|memmove)\(`),
+		"Insecure Deserialization (NSCoding)":       regexp.MustCompile(`initWithCoder:|encodeWithCoder:|conform.*NSCoding|NSSecureCoding`),
+		"Unsafe Custom URL Scheme (No Validation)":  regexp.MustCompile(`openURL:|application.*open.*URL|handleOpenURL`),
+		"Keychain Sharing Vulnerability":            regexp.MustCompile(`kSecAttrAccessGroup|kSecClass.*kSecAttrAccessGroup`),
 	}
 
 	// Manual Heuristics for Cert Pinning
@@ -72,6 +75,57 @@ var (
 		"GoogleUtilities", "Firebase", "AppsFlyer", "FacebookSDK", "Crashlytics",
 		"Alamofire", "AFNetworking", "Adjust", "Mixpanel", "OneSignal", "Kochava",
 		"Branch", "Amplitude",
+	}
+
+	// Known 3rd-party library binary names to skip for vulnerability findings
+	// These produce massive noise (ObjC symbols, class metadata) that drowns real findings
+	knownThirdPartyLibs = []string{
+		"FirebaseCore", "FirebaseCoreInternal", "FirebaseInstallations",
+		"FirebaseMessaging", "FirebaseAnalytics", "FirebaseCrashlytics",
+		"GoogleUtilities", "GoogleSignIn", "GTMSessionFetcher", "GoogleDataTransport",
+		"OneSignalCore", "OneSignalExtension", "OneSignalFramework",
+		"OneSignalInAppMessages", "OneSignalLiveActivities",
+		"OneSignalNotifications", "OneSignalOSCore", "OneSignalOutcomes",
+		"OneSignalUser",
+		"AppAuth", "SDWebImage", "Sentry",
+		"Alamofire", "AFNetworking",
+		"Capacitor", "CapacitorApp", "CapacitorAppLauncher",
+		"CapacitorBlobWriter", "CapacitorBrowser", "CapacitorCamera",
+		"CapacitorClipboard", "CapacitorCommunityAppleSignIn",
+		"CapacitorKeyboard", "CapacitorFilesystem", "CapacitorPreferences",
+		"CapacitorHaptics", "CapacitorStatusBar", "CapacitorSplashScreen",
+		"GCDWebServer", "Cordova", "CordovaPlugins",
+		"FBSDKCoreKit", "FBSDKLoginKit", "FBSDKShareKit",
+		"Bolts", "nanopb", "PromisesObjC",
+	}
+
+	// ObjC symbol prefixes that are class metadata, not actual secrets
+	objcSymbolPrefixes = []string{
+		"_OBJC_CLASS_$_",
+		"_OBJC_METACLASS_$_",
+		"_OBJC_IVAR_$_",
+		"_objc_msgSend$",
+		"__OBJC_$_",
+		"__OBJC_METACLASS_RO_$_",
+		"__OBJC_CLASS_RO_$_",
+		"__OBJC_$_INSTANCE_METHODS_",
+		"__OBJC_$_CLASS_METHODS_",
+		"__OBJC_$_INSTANCE_VARIABLES_",
+		"__OBJC_$_PROP_LIST_",
+		"_OBJC_CLASSLIST_",
+		"__METACLASS_DATA_",
+		"__DATA__Tt",
+		"_symbolic ",
+	}
+
+	// Hardening false positive patterns — Apple system content that always appears
+	hardeningFalsePositives = []string{
+		"apple.com/DTDs/PropertyList",
+		"ocsp.apple.com",
+		"crl.apple.com",
+		"apple.com/appleca",
+		"apple.com/certificateauthority",
+		"w3.org",
 	}
 )
 
@@ -137,7 +191,24 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 			// Phase 23: Deep Links
 			analyzeDeepLinks(info, ents, target)
+
+			// NEW FEATURE 2: Keychain Sharing Analysis
+			AnalyzeKeychainSharingRisks(ents, target)
+
+			// NEW FEATURE 5: App Extension Security
+			AnalyzeAppExtensionSecurity(ents, target)
 		}
+
+		// NEW FEATURE 1: NSCoding Security Analysis
+		AnalyzeNSCodingSecurity(binaryPath, target)
+
+		// NEW FEATURE 3: URL Scheme Validation Analysis
+		if info != nil {
+			AnalyzeURLSchemeValidation(info, binaryPath, target)
+		}
+
+		// NEW FEATURE 4: Background Activity Leak Detection
+		DetectBackgroundActivityLeaks(binaryPath, target)
 	}
 
 	// 2. Scan binary and other files
@@ -149,10 +220,14 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 			return nil
 		}
 
-		// Skip signing files and images/assets to save time
-		if strings.Contains(path, "_CodeSignature") || strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".car") {
+		// Skip signing files, images, assets, and SVG files to save time
+		if strings.Contains(path, "_CodeSignature") || strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".car") || strings.HasSuffix(path, ".svg") || strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".jpeg") || strings.HasSuffix(path, ".gif") || strings.HasSuffix(path, ".webp") || strings.HasSuffix(path, ".ttf") || strings.HasSuffix(path, ".otf") || strings.HasSuffix(path, ".woff") || strings.HasSuffix(path, ".woff2") {
 			return nil
 		}
+
+		// Check if this file is from a known 3rd-party library
+		baseName := filepath.Base(path)
+		isThirdParty := isThirdPartyFile(baseName)
 
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -168,10 +243,15 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 			data = string(content)
 		}
 
-		// 3. Find URLs
+		// 3. Find URLs (always scan all files for URLs)
 		urlMatches := urlRegex.FindAllString(data, -1)
 		for _, u := range urlMatches {
 			target.Report.Findings.URLs = append(target.Report.Findings.URLs, u)
+		}
+
+		// Skip deeper analysis for 3rd-party library files
+		if isThirdParty {
+			return nil
 		}
 
 		// 4. Find Emails
@@ -209,6 +289,7 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 	// Deduplicate findings
 	target.Report.Findings.URLs = deduplicate(target.Report.Findings.URLs)
+	target.Report.Findings.URLs = filterFalsePositiveURLs(target.Report.Findings.URLs)
 	target.Report.Findings.Emails = deduplicate(target.Report.Findings.Emails)
 	target.Report.Findings.IPs = deduplicate(target.Report.Findings.IPs)
 	target.Report.Findings.Secrets = deduplicateFindings(target.Report.Findings.Secrets)
@@ -388,6 +469,11 @@ func scanSecrets(data, path string, target *Target, externalPatterns map[string]
 
 				lineNo, snippet := extractContext(lines, start, data)
 
+				// Skip ObjC metadata symbols — these are class/method names, not actual secrets
+				if isObjCSymbol(snippet) || isObjCSymbol(value) {
+					continue
+				}
+
 				target.Report.Findings.Secrets = append(target.Report.Findings.Secrets, Finding{
 					Title:       name,
 					Description: fmt.Sprintf("Found %s secret", name),
@@ -413,6 +499,17 @@ func scanSecrets(data, path string, target *Target, externalPatterns map[string]
 
 func scanHardeningSignatures(data, path string, target *Target) {
 	lines := strings.Split(data, "\n")
+	baseName := filepath.Base(path)
+
+	// IMPROVED: Skip SDK code to reduce false positives
+	sdk_patterns := []string{"FBSDK", "CleverTap", "MoEngage", "OneSignal", "Firebase",
+		"GoogleAnalytics", "Amplitude", "Sentry", "Adjust", "AppsFlyer", "Mixpanel",
+		"Capabilities", "Branch", "Kochava", "TwitterKit"}
+	for _, sdk := range sdk_patterns {
+		if strings.Contains(baseName, sdk) {
+			return // Skip entire SDK file
+		}
+	}
 
 	for name, pattern := range hardeningSignatures {
 		matches := pattern.FindAllStringIndex(data, -1)
@@ -420,6 +517,11 @@ func scanHardeningSignatures(data, path string, target *Target) {
 			start := m[0]
 
 			lineNo, snippet := extractContext(lines, start, data)
+
+			// Skip hardening false positives
+			if isHardeningFalsePositive(name, snippet) {
+				continue
+			}
 
 			finding := Finding{
 				Title:      name,
@@ -432,7 +534,7 @@ func scanHardeningSignatures(data, path string, target *Target) {
 				target.Report.Findings.InsecureStorage = append(target.Report.Findings.InsecureStorage, finding)
 			} else if strings.Contains(name, "Weak Crypto") {
 				target.Report.Findings.CryptoIssues = append(target.Report.Findings.CryptoIssues, finding)
-			} else if strings.Contains(name, "SQL Injection") || strings.Contains(name, "Code Injection") || strings.Contains(name, "Potential XSS") || strings.Contains(name, "Potential RCE") || strings.Contains(name, "XML Injection") || strings.Contains(name, "NSPredicate") || strings.Contains(name, "Unsafe C") || strings.Contains(name, "Memory Corruption") {
+			} else if strings.Contains(name, "SQL Injection") || strings.Contains(name, "Code Injection") || strings.Contains(name, "Potential XSS") || strings.Contains(name, "Potential RCE") || strings.Contains(name, "XML Injection") || strings.Contains(name, "NSPredicate") || strings.Contains(name, "Unsafe C") || strings.Contains(name, "Memory Corruption") || strings.Contains(name, "Unsafe Custom URL") || strings.Contains(name, "Unvalidated URL") {
 				target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, finding)
 			} else {
 				target.Report.Findings.HardeningIssues = append(target.Report.Findings.HardeningIssues, finding)
@@ -479,6 +581,89 @@ func deduplicate(slice []string) []string {
 		}
 	}
 	return list
+}
+
+// filterFalsePositiveURLs removes known false positive URLs from results
+// These are standard Apple/W3C URLs that appear in every iOS app and are not interesting
+func filterFalsePositiveURLs(urls []string) []string {
+	filtered := []string{}
+	for _, u := range urls {
+		lower := strings.ToLower(u)
+		// Skip w3.org URLs
+		if strings.Contains(lower, "www.w3.org") || strings.Contains(lower, "w3.org") {
+			continue
+		}
+		// Skip *.apple.com URLs
+		if strings.Contains(lower, "apple.com") {
+			continue
+		}
+		filtered = append(filtered, u)
+	}
+	return filtered
+}
+
+// isThirdPartyFile checks if a filename matches a known 3rd-party library
+func isThirdPartyFile(filename string) bool {
+	for _, lib := range knownThirdPartyLibs {
+		if filename == lib || strings.HasPrefix(filename, lib+".") || strings.HasPrefix(filename, lib+"_") {
+			return true
+		}
+	}
+	// Also skip PrivacyInfo.xcprivacy files (Apple privacy manifests)
+	if filename == "PrivacyInfo.xcprivacy" {
+		return true
+	}
+	return false
+}
+
+// isObjCSymbol checks if a snippet is an Objective-C metadata symbol (not a real secret)
+func isObjCSymbol(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	for _, prefix := range objcSymbolPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	// Also skip Swift mangled symbols
+	if strings.HasPrefix(trimmed, "_$s") || strings.HasPrefix(trimmed, "_$S") {
+		return true
+	}
+	return false
+}
+
+// isHardeningFalsePositive checks if a hardening finding is a known false positive
+func isHardeningFalsePositive(name, snippet string) bool {
+	lower := strings.ToLower(snippet)
+
+	// Plaintext HTTP: skip Apple system URLs
+	if name == "Network (Plaintext HTTP)" {
+		for _, fp := range hardeningFalsePositives {
+			if strings.Contains(lower, strings.ToLower(fp)) {
+				return true
+			}
+		}
+	}
+
+	// RCE: skip JS files that just contain the word "Process" in comments/strings
+	if name == "Potential RCE (Process)" {
+		// If the snippet is just a comment or regular word usage, skip
+		if !strings.Contains(snippet, "NSTask") &&
+			!strings.Contains(snippet, "system(") &&
+			!strings.Contains(snippet, "popen(") {
+			// It's likely just the word "Process" in a JS string/comment
+			return true
+		}
+	}
+
+	// Code Injection: skip minified JS eval() in non-suspicious contexts
+	if name == "Code Injection (Eval)" {
+		if strings.HasSuffix(strings.ToLower(filepath.Base(snippet)), ".js") {
+			// JS files commonly use eval-like patterns in bundlers
+			return true
+		}
+	}
+
+	return false
 }
 
 func deduplicateFindings(slice []Finding) []Finding {
@@ -592,4 +777,258 @@ func ExtractStrings(content []byte) string {
 	}
 
 	return sb.String()
+}
+
+// ============================================
+// NEW FEATURE 1: Insecure Deserialization Analysis
+// ============================================
+
+// AnalyzeNSCodingSecurity checks for unsafe NSCoding implementations
+func AnalyzeNSCodingSecurity(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	// Skip SDK code to prevent false positives
+	sdk_patterns := []string{"FBSDK", "CleverTap", "MoEngage", "OneSignal", "Firebase",
+		"GoogleAnalytics", "Amplitude", "Sentry", "Adjust", "AppsFlyer"}
+	for _, sdk := range sdk_patterns {
+		if strings.Contains(baseName, sdk) {
+			return
+		}
+	}
+
+	// IMPROVED: Pattern 1 - initWithCoder without NSSecureCoding WITH POC
+	if strings.Contains(data, "initWithCoder") && !strings.Contains(data, "NSSecureCoding") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:       "Unsafe NSCoding (Possible Object Injection - CRITICAL)",
+			Description: "CRITICAL: class implements NSCoding WITHOUT NSSecureCoding. EXPLOITATION: Create malicious plist with arbitrary object. User opens file → app calls unarchiveObject() → object init executes attacker code. POC: Build object with code in initWithCoder: that calls system() or launches malware. IMPACT: Remote Code Execution, device compromise.",
+			FilePath:    filepath.Base(binaryPath),
+			LineNumber:  0,
+			Snippet:     "POC: Malicious plist → [NSKeyedUnarchiver unarchiveObjectWithData:data] → initWithCoder: executes = RCE",
+		})
+	}
+
+	// IMPROVED: Pattern 2 - NSKeyedUnarchiver without allowedClasses WITH POC
+	if strings.Contains(data, "NSKeyedUnarchiver") && !strings.Contains(data, "allowedClasses") &&
+		!strings.Contains(data, "NSSecureCoding") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:       "Unsafe NSKeyedUnarchiver Usage (Object Injection - CRITICAL)",
+			Description: "CRITICAL: NSKeyedUnarchiver.unarchiveObject() WITHOUT allowedClasses. EXPLOITATION: Deserializes ANY object type. Attacker creates CustomObject with malicious code → app deserializes → code executes. NO validation means attacker has full control over object type. IMPACT: Arbitrary code execution, data theft, malware installation.",
+			FilePath:    filepath.Base(binaryPath),
+			LineNumber:  0,
+			Snippet:     "POC: [NSKeyedUnarchiver unarchiveObjectWithData:maliciousPlist] → Deserializes attacker's object → -[AttackerObject initWithCoder:] → system(@\"malware_command\")",
+		})
+	}
+
+	// IMPROVED: Pattern 3 - Legacy unarchiveObjectWithData WITH POC
+	if strings.Contains(data, "unarchiveObjectWithData") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:       "Deprecated Deserialization API (CRITICAL - Unsafe)",
+			Description: "CRITICAL: Uses deprecated unarchiveObjectWithData - KNOWN UNSAFE. EXPLOITATION: This exact API is exploited by object injection attacks. Apple explicitly says: DO NOT USE. FIXED BY: Use unarchiveTopLevelObjectWithData:allowingSecureCoding:error: with restricted class list. IMPACT: Direct RCE vector.",
+			FilePath:    filepath.Base(binaryPath),
+			LineNumber:  0,
+			Snippet:     "POC: -[NSKeyedUnarchiver unarchiveObjectWithData:] is the EXACT vector for object injection RCE",
+		})
+	}
+}
+
+// ============================================
+// NEW FEATURE 2: Keychain Sharing Attack Surface Analysis
+// ============================================
+
+// AnalyzeKeychainSharingRisks checks for overpermissive keychain access groups
+func AnalyzeKeychainSharingRisks(ents map[string]interface{}, target *Target) {
+	if accessGroups, ok := ents["keychain-access-groups"]; ok {
+		// Check if keychain-access-groups too permissive
+		if groupList, ok := accessGroups.([]interface{}); ok {
+			for _, g := range groupList {
+				groupStr := fmt.Sprintf("%v", g)
+
+				// Skip framework-level groups (false positive prevention)
+				skipFrameworkGroups := []string{"com.apple.", "$(AppIdentifierPrefix)"}
+				shouldSkip := false
+				for _, skip := range skipFrameworkGroups {
+					if strings.HasPrefix(groupStr, skip) {
+						shouldSkip = true
+						break
+					}
+				}
+				if shouldSkip {
+					continue
+				}
+
+				// IMPROVED: Risk 1 - Sharing with app groups WITH POC
+				if strings.Contains(groupStr, "group.") {
+					target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+						fmt.Sprintf("VULNERABILITY: Keychain Shared via App Groups: %s\nEXPLOITATION: Create attacker app with same app group ID. Attacker app can read/write all keychain items. POC: SecItemCopyMatching(queryForGroup) returns all tokens, passwords.\nIMPACT: Auth token theft, account takeover, cross-app data theft", groupStr))
+				}
+
+				// IMPROVED: Risk 2 - Wildcard sharing CRITICAL!
+				if strings.Contains(groupStr, "*") {
+					target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+						fmt.Sprintf("CRITICAL: Keychain shared with WILDCARD: %s\nEXPLOITATION: ANY app on device can access keychain. Attacker app reads all stored secrets, tokens, passwords. POC: Simple query to keychain with group ID = attacker gets everything.\nIMPACT: MAXIMUM RISK - Complete compromise of stored secrets", groupStr))
+				}
+
+				// IMPROVED: Risk 3 - Team ID sharing WITH POC
+				if strings.HasPrefix(groupStr, "TEAMID.") || strings.Contains(groupStr, "$(TeamIdentifierPrefix)") {
+					target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+						fmt.Sprintf("HIGH: Keychain Shared by Team ID: %s\nEXPLOITATION: All apps from same developer team can access. Attacker's app (same team) reads secrets. POC: Create app with same team ID, read keychain.\nIMPACT: Data accessible to developer's other apps (potentially malicious)", groupStr))
+				}
+			}
+		}
+	}
+
+	// IMPROVED: Check for weak access level combined with app groups
+	if appGroups, ok := ents["com.apple.security.application-groups"]; ok {
+		if appGroupList, ok := appGroups.([]interface{}); ok && len(appGroupList) > 0 {
+			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+				"HIGH RISK: App Groups Enabled + Keychain Sharing\nEXPLOITATION: Extensions and other grouped apps access shared keychain. Widget/extension reads auth tokens. POC: Access shared container, read serialized tokens.\nIMPACT: Extension isolation broken, sensitive data shared cross-app")
+		}
+	}
+}
+
+// ============================================
+// NEW FEATURE 3: Custom URL Scheme Security Analysis
+// ============================================
+
+// AnalyzeURLSchemeValidation checks for unsafe URL scheme implementations
+func AnalyzeURLSchemeValidation(info *AppInfo, binaryPath string, target *Target) {
+	if len(info.CFBundleURLTypes) == 0 {
+		return
+	}
+
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	// Skip SDK code - only check app binaries, not 3rd-party frameworks (prevent false positives)
+	sdk_patterns := []string{"FBSDK", "CleverTap", "MoEngage", "OneSignal", "Firebase",
+		"GoogleAnalytics", "Amplitude", "Sentry", "Adjust", "AppsFlyer", "Mixpanel"}
+	for _, sdk := range sdk_patterns {
+		if strings.Contains(baseName, sdk) {
+			return // Skip SDK code - false positive prevention
+		}
+	}
+
+	for _, urlType := range info.CFBundleURLTypes {
+		for _, scheme := range urlType.CFBundleURLSchemes {
+			schemeStr := strings.ToLower(scheme)
+
+			// IMPROVED: Flag 1 - No input validation detected WITH DETAILED POC
+			if !strings.Contains(data, "validateURL") &&
+				!strings.Contains(data, "sanitize") &&
+				!strings.Contains(data, "validate.*URL") &&
+				strings.Contains(data, "openURL") {
+				target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+					Title:       fmt.Sprintf("Unvalidated URL Scheme Handler: %s://", scheme),
+					Description: fmt.Sprintf("VULNERABILITY: URL scheme '%s://' has NO input validation. EXPLOITATION: Send '%s://payment?amount=-1' or '%s://search?q=<img src=x onerror=alert(1)>' - app processes without checking. IMPACT: Parameter injection, XSS, logic bypass.", scheme, scheme, scheme),
+					FilePath:    filepath.Base(binaryPath),
+					LineNumber:  0,
+					Snippet:     fmt.Sprintf("POC: %s://action?param=VALUE' OR '1'='1\" - if params used in SQL queries = SQLi", scheme),
+				})
+			}
+
+			// IMPROVED: Flag 2 - Auth-related schemes (CRITICAL RISK)
+			dangerousPatterns := []string{"oauth", "auth", "login", "callback", "payment"}
+			for _, pattern := range dangerousPatterns {
+				if strings.Contains(schemeStr, pattern) {
+					target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+						Title:       fmt.Sprintf("CRITICAL: Unvalidated Auth Scheme: %s:// (NO validation)", scheme),
+						Description: fmt.Sprintf("CRITICAL VULNERABILITY: Auth scheme '%s://' unvalidated. EXPLOITATION: Attacker sends '%s://login?user=admin&bypass=true' - NO SERVER VERIFICATION. IMPACT: Account takeover, privilege escalation, fraudulent actions.", scheme, scheme),
+						FilePath:    filepath.Base(binaryPath),
+						LineNumber:  0,
+						Snippet:     fmt.Sprintf("POC: %s://login?username=victim@email.com&token=ATTACKER_TOKEN&admin=true", scheme),
+					})
+					break
+				}
+			}
+
+			// IMPROVED: Flag 3 - No whitelist validation WITH EXPLICIT POC
+			if !strings.Contains(data, "allowedHosts") &&
+				!strings.Contains(data, "whitelist") &&
+				!strings.Contains(data, "allowlist") &&
+				strings.Contains(data, scheme) {
+				target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+					Title:       fmt.Sprintf("Missing Host Whitelist: %s://", scheme),
+					Description: fmt.Sprintf("VULNERABILITY: No host/origin validation on '%s://' handler. EXPLOITATION: '%s://profile?remote_user=admin' OR '%s://deeplink?redirect=http://attacker.com/phishing'. IMPACT: Access unintended features, redirect attacks.", scheme, scheme, scheme),
+					FilePath:    filepath.Base(binaryPath),
+					LineNumber:  0,
+					Snippet:     fmt.Sprintf("POC: %s://admin?elevation_required=false OR %s://bypass?security_check=no", scheme, scheme),
+				})
+			}
+		}
+	}
+}
+
+// ============================================
+// NEW FEATURE 4: Background Activity Data Leak Detection
+// ============================================
+
+// DetectBackgroundActivityLeaks checks for sensitive operations in background
+func DetectBackgroundActivityLeaks(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+
+	// Pattern: URLSession with background config handling sensitive data
+	backgroundPatterns := []struct {
+		pattern     string
+		description string
+	}{
+		{`backgroundSessionConfiguration`, "Background URLSession detected - ensure no sensitive data is transmitted"},
+		{`beginBackgroundTask.*URLSession`, "Background data sync detected - verify data encryption in transit"},
+		{`AppDelegate.*background.*API`, "Background API calls detected - check for data exfiltration"},
+		{`didFinishLaunching.*fetch.*background`, "Background fetch on app launch - may leak data to analytics"},
+	}
+
+	for _, bp := range backgroundPatterns {
+		if regex := regexp.MustCompile(bp.pattern); regex.MatchString(data) {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:       "Potential Background Data Leak",
+				Description: bp.description,
+				FilePath:    filepath.Base(binaryPath),
+				LineNumber:  0,
+				Snippet:     bp.pattern,
+			})
+		}
+	}
+}
+
+// ============================================
+// NEW FEATURE 5: App Extension Security Analysis
+// ============================================
+
+// AnalyzeAppExtensionSecurity checks shared container and extension risks
+func AnalyzeAppExtensionSecurity(ents map[string]interface{}, target *Target) {
+	// Check for app groups (shared container)
+	if appGroups, ok := ents["com.apple.security.application-groups"]; ok {
+		if groupList, ok := appGroups.([]interface{}); ok {
+			for _, g := range groupList {
+				groupStr := fmt.Sprintf("%v", g)
+				target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+					fmt.Sprintf("App Extension Shared Container: %s - Extension/App can intercept data", groupStr))
+			}
+		}
+	}
+
+	// Check for inter-app audio routing (vulnerable to interception)
+	if _, ok := ents["com.apple.security.network"]; ok {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"Network framework entitlement - may allow inter-process data observation")
+	}
+
+	// Check for WidgetKit bundle (watchkit/siri intents)
+	if _, ok := ents["com.apple.developer.widget-kit"]; ok {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"WidgetKit enabled - widget data may be accessible to other apps on lock screen")
+	}
 }

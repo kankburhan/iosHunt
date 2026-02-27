@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"ioshunt/core"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -48,9 +47,17 @@ func init() {
 }
 
 func runDumpScript(bundleID string, scriptName string) {
+	// Auto-detect device
+	device, err := core.GetConnectedDevice()
+	if err != nil {
+		fmt.Printf("[!] Warning: %v. Assuming remote/TCP or relying on Frida's auto-detection.\n", err)
+	} else {
+		fmt.Printf("[*] Detected USB Device: %s (%s)\n", device.Name, device.ID)
+	}
+
 	fmt.Printf("[*] Dumping %s from %s...\n", scriptName, bundleID)
 
-	script, err := core.GetAssetScript(filepath.Join("assets", scriptName))
+	script, err := core.GetAssetScript(scriptName)
 	if err != nil {
 		fmt.Printf("[!] Failed to load script: %v\n", err)
 		return
