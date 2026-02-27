@@ -17,63 +17,63 @@ const (
 
 // DataFlowNode represents a single point in the data flow graph
 type DataFlowNode struct {
-	ID             string            `json:"id"`
-	Type           DataFlowNodeType  `json:"type"`
-	Name           string            `json:"name"`
-	Category       string            `json:"category"` // "secret", "logging", "network", "storage"
-	SourceFinding  *Finding          `json:"source_finding,omitempty"`
-	File           string            `json:"file"`
-	Line           int               `json:"line"`
-	Context        string            `json:"context"`
-	Confidence     float64           `json:"confidence"` // 0.0-1.0
-	TaintedFrom    []string          `json:"tainted_from,omitempty"`
-	PropagatesTo   []string          `json:"propagates_to,omitempty"`
-	BinaryTracking *BinaryFlowInfo   `json:"binary_tracking,omitempty"` // For binary-level analysis
+	ID             string           `json:"id"`
+	Type           DataFlowNodeType `json:"type"`
+	Name           string           `json:"name"`
+	Category       string           `json:"category"` // "secret", "logging", "network", "storage"
+	SourceFinding  *Finding         `json:"source_finding,omitempty"`
+	File           string           `json:"file"`
+	Line           int              `json:"line"`
+	Context        string           `json:"context"`
+	Confidence     float64          `json:"confidence"` // 0.0-1.0
+	TaintedFrom    []string         `json:"tainted_from,omitempty"`
+	PropagatesTo   []string         `json:"propagates_to,omitempty"`
+	BinaryTracking *BinaryFlowInfo  `json:"binary_tracking,omitempty"` // For binary-level analysis
 }
 
 // BinaryFlowInfo tracks data flow at the binary/assembly level
 type BinaryFlowInfo struct {
-	Address        string          `json:"address"`        // Memory address or offset in binary
-	Instructions   []string        `json:"instructions"`   // Assembly instructions involved
-	Registers      []string        `json:"registers"`      // Registers used (rax, r0, etc)
-	Functions      []string        `json:"functions"`      // Function names involved
-	ControlFlowPath string          `json:"control_flow"`   // Path through CFG
-	ConfidenceInfo *ConfidenceData  `json:"confidence_details,omitempty"`
+	Address         string          `json:"address"`      // Memory address or offset in binary
+	Instructions    []string        `json:"instructions"` // Assembly instructions involved
+	Registers       []string        `json:"registers"`    // Registers used (rax, r0, etc)
+	Functions       []string        `json:"functions"`    // Function names involved
+	ControlFlowPath string          `json:"control_flow"` // Path through CFG
+	ConfidenceInfo  *ConfidenceData `json:"confidence_details,omitempty"`
 }
 
 // ConfidenceData explains why we're confident in a flow
 type ConfidenceData struct {
-	StringMatch      float64 `json:"string_match"`      // Exact string match confidence
-	SemanticMatch    float64 `json:"semantic_match"`    // Variable name match
+	StringMatch      float64 `json:"string_match"`       // Exact string match confidence
+	SemanticMatch    float64 `json:"semantic_match"`     // Variable name match
 	ControlFlowMatch float64 `json:"control_flow_match"` // Binary-level CFG match
-	FileProximity    float64 `json:"file_proximity"`    // Are source/sink in same file?
+	FileProximity    float64 `json:"file_proximity"`     // Are source/sink in same file?
 	FunctionProx     float64 `json:"function_proximity"` // Binary-level function proximity
-	FinalScore       float64 `json:"final_score"`       // Overall confidence
+	FinalScore       float64 `json:"final_score"`        // Overall confidence
 }
 
 // DataFlowPath represents a complete source→sink flow
 type DataFlowPath struct {
-	ID          string           `json:"id"`
-	Source      *DataFlowNode    `json:"source"`
-	Sinks       []*DataFlowNode  `json:"sinks"`
-	Confidence  float64          `json:"confidence"`
-	Severity    string           `json:"severity"` // CRITICAL/HIGH/MEDIUM/LOW
-	Description string           `json:"description"`
-	Nodes       []*DataFlowNode  `json:"nodes"`
+	ID           string          `json:"id"`
+	Source       *DataFlowNode   `json:"source"`
+	Sinks        []*DataFlowNode `json:"sinks"`
+	Confidence   float64         `json:"confidence"`
+	Severity     string          `json:"severity"` // CRITICAL/HIGH/MEDIUM/LOW
+	Description  string          `json:"description"`
+	Nodes        []*DataFlowNode `json:"nodes"`
 	Remediations []string        `json:"remediations,omitempty"`
-	FlowType    string           `json:"flow_type"` // "logging", "network", "storage", etc
+	FlowType     string          `json:"flow_type"` // "logging", "network", "storage", etc
 }
 
 // DataFlowAnalyzer orchestrates the complete data flow analysis
 type DataFlowAnalyzer struct {
-	Target       *Target
-	Findings     []Finding
-	Nodes        map[string]*DataFlowNode
-	Paths        []DataFlowPath
-	SourceNodes  []*DataFlowNode
-	SinkNodes    []*DataFlowNode
-	BinaryData   string // Extracted strings from binary
-	BinaryPath   string // Path to binary file
+	Target      *Target
+	Findings    []Finding
+	Nodes       map[string]*DataFlowNode
+	Paths       []DataFlowPath
+	SourceNodes []*DataFlowNode
+	SinkNodes   []*DataFlowNode
+	BinaryData  string // Extracted strings from binary
+	BinaryPath  string // Path to binary file
 }
 
 // ============================================
@@ -208,15 +208,15 @@ func (dfa *DataFlowAnalyzer) IdentifySinks(report *Report) {
 		if !isSafeURL(url) {
 			sinkID++
 			node := &DataFlowNode{
-				ID:       fmt.Sprintf("sink_network_%d", sinkID),
-				Type:     NodeTypeSink,
-				Name:     fmt.Sprintf("Network: %s", truncateURL(url)),
-				Category: "network",
-				File:     "unknown",
-				Line:     0,
-				Context:  url,
-				Confidence: 0.75, // Networks are risky but not file-mapped
-				TaintedFrom: []string{},
+				ID:           fmt.Sprintf("sink_network_%d", sinkID),
+				Type:         NodeTypeSink,
+				Name:         fmt.Sprintf("Network: %s", truncateURL(url)),
+				Category:     "network",
+				File:         "unknown",
+				Line:         0,
+				Context:      url,
+				Confidence:   0.75, // Networks are risky but not file-mapped
+				TaintedFrom:  []string{},
 				PropagatesTo: []string{},
 			}
 
@@ -231,15 +231,15 @@ func (dfa *DataFlowAnalyzer) IdentifySinks(report *Report) {
 		if isStorageSink(misc) {
 			sinkID++
 			node := &DataFlowNode{
-				ID:       fmt.Sprintf("sink_storage_%d", sinkID),
-				Type:     NodeTypeSink,
-				Name:     "Storage: " + extractStorageName(misc),
-				Category: "storage",
-				File:     "Info.plist",
-				Line:     0,
-				Context:  misc,
-				Confidence: 0.85,
-				TaintedFrom: []string{},
+				ID:           fmt.Sprintf("sink_storage_%d", sinkID),
+				Type:         NodeTypeSink,
+				Name:         "Storage: " + extractStorageName(misc),
+				Category:     "storage",
+				File:         "Info.plist",
+				Line:         0,
+				Context:      misc,
+				Confidence:   0.85,
+				TaintedFrom:  []string{},
 				PropagatesTo: []string{},
 			}
 
@@ -428,9 +428,9 @@ func (dfa *DataFlowAnalyzer) DetectFlowsBinaryLevel(report *Report) {
 
 // BinaryTrace represents a potential data flow path discovered through binary analysis
 type BinaryTrace struct {
-	SecretValue string
-	Nodes       []*DataFlowNode // Intermediate nodes in the trace
-	Confidence  float64
+	SecretValue  string
+	Nodes        []*DataFlowNode // Intermediate nodes in the trace
+	Confidence   float64
 	Instructions []string // Assembly instructions found
 }
 
