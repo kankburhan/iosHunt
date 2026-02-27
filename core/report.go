@@ -49,18 +49,25 @@ type Report struct {
 			Schemes   []string `json:"schemes"`
 			Universal []string `json:"universal_links"`
 		} `json:"deep_links"`
+
+		// NEW: Data Flow Analysis (Phase 24)
+		DataFlows  []interface{}          `json:"data_flows,omitempty"`   // Data flow paths from source to sink
+		TaintGraph map[string]interface{} `json:"taint_graph,omitempty"`  // Nodes in the taint graph
 	} `json:"findings"`
 }
 
 // Finding represents a vulnerability or interesting artifact with context
 type Finding struct {
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	FilePath    string `json:"file_path"`
-	LineNumber  int    `json:"line_number,omitempty"`
-	Snippet     string `json:"snippet,omitempty"`
-	Value       string `json:"value,omitempty"` // The specific secret string
-	// Severity    string `json:"severity,omitempty"` // Future
+	Title              string   `json:"title"`
+	Description        string   `json:"description,omitempty"`
+	FilePath           string   `json:"file_path"`
+	LineNumber         int      `json:"line_number,omitempty"`
+	Snippet            string   `json:"snippet,omitempty"`
+	Value              string   `json:"value,omitempty"` // The specific secret string
+	DataFlowNodeID     string   `json:"dataflow_node_id,omitempty"`   // NEW: Reference to TaintGraph node
+	IsTaintSource      bool     `json:"is_taint_source,omitempty"`    // NEW: Is this a SOURCE?
+	IsTaintSink        bool     `json:"is_taint_sink,omitempty"`      // NEW: Is this a SINK?
+	TaintPaths         []string `json:"taint_paths,omitempty"`        // NEW: Path IDs flowing through this
 }
 
 func NewReport(target string) *Report {

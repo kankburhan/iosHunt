@@ -323,6 +323,16 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 	target.Report.Findings.DeepLinks.Schemes = deduplicate(target.Report.Findings.DeepLinks.Schemes)
 	target.Report.Findings.DeepLinks.Universal = deduplicate(target.Report.Findings.DeepLinks.Universal)
 
+	// NEW: Data Flow Analysis (Phase 24 - String & Binary Level)
+	// This analyzes how secrets flow through the app from sources to sinks
+	fmt.Printf("[*] Analyzing data flows (sources → sinks)...\n")
+	if err := AnalyzeDataFlow(target, target.Report); err != nil {
+		fmt.Printf("[!] Data flow analysis failed: %v (continuing)\n", err)
+		// Don't fail - DFA is enhancement, not critical
+	} else if len(target.Report.Findings.DataFlows) > 0 {
+		fmt.Printf("[+] Found %d data flow paths\n", len(target.Report.Findings.DataFlows))
+	}
+
 	if err != nil {
 		return err
 	}
