@@ -4,7 +4,7 @@
 
 `ioshunt` is a comprehensive CLI tool designed to automate the entire lifecycle of an iOS application security assessment. From downloading the IPA to advanced runtime analysis, it handles the tedious setup so you can focus on finding vulnerabilities.
 
-## 🚀 Features (v1.0.0)
+## 🚀 Features (v1.12.0)
 
 ### 1. Automation Pipeline
 -   **Download**: Fetches IPAs from the App Store (handles auth & country selection).
@@ -16,18 +16,26 @@
 -   **Secrets Scanning**: Detects hardcoded keys, tokens, and private data using custom regex templates.
 -   **Misconfigurations**: Checks for insecure `Info.plist` settings (ATS, File Sharing) and Entitlements (`get-task-allow`).
 -   **Binary Security**: Verifies PIE, ARC, Stack Canaries, and Encryption status.
--   **Reporting**: Generates JSON and HTML reports (`ioshunt report`).
+-   **Data Flow Analysis** (NEW): Traces sensitive data flows from sources (secrets) to sinks (logging, networking, storage). Generates taint graphs with 42K+ flows analyzed on real apps.
+-   **Reporting**: Generates JSON and HTML reports (`ioshunt report`) with integrated taint graph data.
 
-### 3. Dynamic Analysis (Runtime)
--   **Frida Integration**: Attaches to running processes with a single command.
+### 3. AI-Powered Vulnerability Analysis (NEW)
+-   **AI Assessment**: Sends static analysis reports to AI models for deep vulnerability assessment and remediation suggestions.
+-   **Configuration**: Manage AI provider settings via `ioshunt config` (supports OpenAI-compatible APIs).
+-   **AI Models**: Works with GPT-4, GPT-4o, and custom models via configurable endpoints.
+-   **Example**: `ioshunt analyze com.example.app` for AI-powered analysis of scan results.
+
+### 4. Dynamic Analysis (Runtime)
+-   **Frida Integration**: Attaches to running processes with a single command and device detection.
 -   **Bypasses**: Built-in scripts for **SSL Pinning**, **Biometrics**, **Jailbreak Detection**, and **iXGuard/Anti-Debugging**.
 -   **Forensics**: Dumps **Keychain**, **Cookies**, and **NSUserDefaults** (`ioshunt dump`).
 -   **Monitoring**: Logs crypto operations (`CCCrypt`, `SecKey`) and HTTP headers (`Authorization`) in real-time.
 
-### 4. Utilities
+### 5. Utilities
 -   **Update**: Self-updating via `ioshunt update`.
 -   **Doctor**: Verifies environment health and dependencies.
 -   **Clean**: Manages and cleans up workspace data.
+-   **Config**: Manage iOSHunt settings including AI API credentials.
 
 ## 🛠 Installation
 
@@ -51,11 +59,31 @@ Run the complete workflow (Download -> Inject -> Resign -> Install -> Attach):
 ioshunt com.example.app
 ```
 
-### Static Analysis
+### Static Analysis with Data Flow Analysis
 ```bash
-# Analyze a target and generate an HTML report
+# Analyze a target with data flow tracking
 ioshunt recon com.example.app
 ioshunt report com.example.app --format html
+
+# This generates a report with:
+# - Traditional vulnerability findings
+# - Taint graph showing data flows from secrets to sinks
+# - Path visualization for sensitive data exposure
+# - Real example: AirAsia app: 42,480 flows detected across all sinks
+```
+
+### AI-Powered Vulnerability Assessment
+```bash
+# Configure AI provider (OpenAI example)
+ioshunt config set ai_api_key sk-xxxx
+ioshunt config set ai_model gpt-4o
+ioshunt config show
+
+# Analyze latest scan with AI
+ioshunt analyze com.example.app
+
+# Or analyze a specific report
+ioshunt analyze --report /path/to/report.json
 ```
 
 ### Runtime Analysis
