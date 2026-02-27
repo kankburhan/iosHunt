@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -197,6 +198,12 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 			// NEW FEATURE 5: App Extension Security
 			AnalyzeAppExtensionSecurity(ents, target)
+
+			// BUG BOUNTY FEATURE 4: Entitlements misconfiguration
+			AnalyzeEntitlementsMisconfig(ents, target)
+
+			// BUG BOUNTY FEATURE 5: Network security configuration
+			AnalyzeNetworkSecurityConfig(info, ents, target)
 		}
 
 		// NEW FEATURE 1: NSCoding Security Analysis
@@ -209,9 +216,20 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 		// NEW FEATURE 4: Background Activity Leak Detection
 		DetectBackgroundActivityLeaks(binaryPath, target)
+
+		// BUG BOUNTY FEATURES (5 new detectors based on real-world iOS vulnerability research)
+		// Feature 1: Keychain API misuse
+		AnalyzeKeychainAPIUsage(binaryPath, target)
+
+		// Feature 2: Hardcoded secrets with entropy analysis
+		AnalyzeHardcodedSecrets(binaryPath, target)
+
+		// Feature 3: Logging data leaks (credentials in log statements)
+		AnalyzeLoggingStatements(binaryPath, target)
 	}
 
 	// 2. Scan binary and other files
+
 	err = filepath.Walk(target.AppPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1031,4 +1049,402 @@ func AnalyzeAppExtensionSecurity(ents map[string]interface{}, target *Target) {
 		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
 			"WidgetKit enabled - widget data may be accessible to other apps on lock screen")
 	}
+}
+
+// ============================================
+// BUG BOUNTY FEATURE 1: Keychain API Misuse Detection
+// ============================================
+
+// AnalyzeKeychainAPIUsage detects insecure keychain API usage patterns
+func AnalyzeKeychainAPIUsage(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	// Skip SDK code
+	sdk_patterns := []string{"FBSDK", "CleverTap", "MoEngage", "OneSignal", "Firebase",
+		"GoogleAnalytics", "Amplitude", "Sentry", "Adjust", "AppsFlyer"}
+	for _, sdk := range sdk_patterns {
+		if strings.Contains(baseName, sdk) {
+			return
+		}
+	}
+
+	// Pattern 1: kSecAttrAccessibleAlways (accessible while device locked)
+	if strings.Contains(data, "kSecAttrAccessibleAlways") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:       "CRITICAL: Keychain Accessible While Locked (kSecAttrAccessibleAlways)",
+			Description: "CRITICAL VULNERABILITY: Keychain item set to kSecAttrAccessibleAlways - readable even when device is locked. EXPLOITATION: Attacker with physical access OR Frida hook extracts credentials without unlock. Tokens stored with this attribute are always accessible. POC: frida hook SecItemAdd → extract kSecValueData from items with kSecAttrAccessibleAlways. IMPACT: Permanent credential theft, no device unlock required.",
+			FilePath:    baseName,
+			LineNumber:  0,
+			Snippet:     "kSecAttrAccessibleAlways = tokens readable while locked or via Frida",
+		})
+	}
+
+	// Pattern 2: kSecAttrAccessibleAlwaysThisDeviceOnly (accessible while device locked, but not in iCloud)
+	if strings.Contains(data, "kSecAttrAccessibleAlwaysThisDeviceOnly") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:       "HIGH: Keychain Accessible While Locked (kSecAttrAccessibleAlwaysThisDeviceOnly)",
+			Description: "HIGH VULNERABILITY: Keychain item set to kSecAttrAccessibleAlwaysThisDeviceOnly - readable when device is locked. EXPLOITATION: Physical device access or jailbreak can extract credentials without entering passcode. IMPACT: Credentials exposed to local attacks, reduced security posture.",
+			FilePath:    baseName,
+			LineNumber:  0,
+			Snippet:     "kSecAttrAccessibleAlwaysThisDeviceOnly = tokens readable while locked",
+		})
+	}
+
+	// Pattern 3: Missing kSecAttrAccessible entirely (defaults to insecure)
+	if strings.Contains(data, "SecItemAdd") && !strings.Contains(data, "kSecAttrAccessible") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:       "MEDIUM: SecItemAdd Missing Accessibility Attribute",
+			Description: "VULNERABILITY: SecItemAdd() call without kSecAttrAccessible attribute. Defaults to kSecAttrAccessibleWhenUnlockedThisDeviceOnly. RECOMMENDED: Use kSecAttrAccessibleWhenUnlockedThisDeviceOnly explicitly for tokens/passwords. IMPACT: May use insecure default if implementation changed.",
+			FilePath:    baseName,
+			LineNumber:  0,
+			Snippet:     "SecItemAdd() without explicit kSecAttrAccessible",
+		})
+	}
+}
+
+// ============================================
+// BUG BOUNTY FEATURE 2: Hardcoded Secrets with Entropy Detection
+// ============================================
+
+// AnalyzeHardcodedSecrets detects high-entropy strings and known hardcoded secret patterns
+func AnalyzeHardcodedSecrets(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+
+	// Extract strings from binary
+	data := ExtractStrings(content)
+	lines := strings.Split(data, "\n")
+
+	// Entropy-based detection for random-looking strings (likely secrets)
+	foundSecrets := make(map[string]bool) // Deduplicate
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Only analyze reasonably long strings (20+ chars = possible secrets)
+		if len(line) >= 20 && len(line) <= 200 {
+			entropy := calculateEntropy(line)
+
+			// Flag if entropy > 4.5 (highly random, suspicious)
+			if entropy > 4.5 {
+				// Skip common false positives
+				if isCommonString(line) {
+					continue
+				}
+
+				key := fmt.Sprintf("%s_entropy_%.2f", line, entropy)
+				if !foundSecrets[key] {
+					foundSecrets[key] = true
+					target.Report.Findings.Secrets = append(target.Report.Findings.Secrets, Finding{
+						Title:       "HIGH ENTROPY STRING (Possible Hardcoded Secret)",
+						Description: fmt.Sprintf("SUSPICIOUS: Found high-entropy string (entropy: %.2f). Pattern indicates hardcoded secret: API key, token, password, or encryption key. Verify string '%s' is not sensitive data. IMPACT: If secret is exposed, attacker can authenticate as app.", entropy, line),
+						FilePath:    filepath.Base(binaryPath),
+						LineNumber:  0,
+						Snippet:     line,
+						Value:       line,
+					})
+				}
+			}
+		}
+	}
+
+	// Known secret patterns (extends existing secret scanning)
+	additionalPatterns := []struct {
+		name    string
+		pattern *regexp.Regexp
+		severity string
+	}{
+		{
+			"Stripe Test Key",
+			regexp.MustCompile(`sk_test_[0-9a-zA-Z]{20,}`),
+			"HIGH",
+		},
+		{
+			"JWT Token",
+			regexp.MustCompile(`eyJ[A-Za-z0-9_-]{50,}\.[A-Za-z0-9_-]{50,}\.[A-Za-z0-9_-]{20,}`),
+			"CRITICAL",
+		},
+		{
+			"MongoDB Connection String",
+			regexp.MustCompile(`mongodb://[a-zA-Z0-9_:]+@[a-zA-Z0-9.-]+`),
+			"CRITICAL",
+		},
+		{
+			"Private RSA/EC Key",
+			regexp.MustCompile(`-----BEGIN (RSA|EC) PRIVATE KEY-----`),
+			"CRITICAL",
+		},
+	}
+
+	for _, ap := range additionalPatterns {
+		matches := ap.pattern.FindAllString(data, -1)
+		for _, match := range matches {
+			if !foundSecrets[match] {
+				foundSecrets[match] = true
+				target.Report.Findings.Secrets = append(target.Report.Findings.Secrets, Finding{
+					Title:       fmt.Sprintf("%s: %s", ap.severity, ap.name),
+					Description: fmt.Sprintf("%s: Hardcoded %s found in binary. This credential can be extracted and used to authenticate/compromise services. IMMEDIATE ACTION: Rotate this secret, revoke old tokens, generate new API keys.", ap.severity, ap.name),
+					FilePath:    filepath.Base(binaryPath),
+					LineNumber:  0,
+					Snippet:     match,
+					Value:       match,
+				})
+			}
+		}
+	}
+}
+
+// ============================================
+// BUG BOUNTY FEATURE 3: Logging Data Leak Detection
+// ============================================
+
+// AnalyzeLoggingStatements detects logging calls that expose sensitive data
+func AnalyzeLoggingStatements(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := ExtractStrings(content)
+	lines := strings.Split(data, "\n")
+
+	// Patterns that indicate logging with sensitive data
+	sensitivePatterns := []struct {
+		logPattern string
+		logType    string
+		severity   string
+	}{
+		// NSLog/print with credentials
+		{`(?i)NSLog.*password|NSLog.*passwd|NSLog.*pwd`, "NSLog with password", "CRITICAL"},
+		{`(?i)print.*password|print.*credentials|print.*token`, "print() with password", "CRITICAL"},
+		{`(?i)NSLog.*token|NSLog.*auth.*token|NSLog.*Bearer`, "NSLog with auth token", "CRITICAL"},
+		{`(?i)print.*Bearer|print.*bearer.*token|print.*access_token`, "print() with Bearer token", "CRITICAL"},
+		{`(?i)NSLog.*credit.*card|NSLog.*cc.*number|NSLog.*cardNumber`, "NSLog with payment data", "CRITICAL"},
+		{`(?i)NSLog.*ssn|NSLog.*social.*security|NSLog.*\..*\d{3}.*\d{2}.*\d{4}`, "NSLog with SSN/PII", "CRITICAL"},
+		{`(?i)debugPrint.*password|debugPrint.*token|debugPrint.*secret`, "debugPrint with sensitive data", "HIGH"},
+		{`(?i)api.*key.*=|apiKey.*=|API_KEY`, "API key assignment (may be logged)", "HIGH"},
+		{`(?i)print.*secret|print.*apiKey|print.*api_key`, "print() with API key", "HIGH"},
+	}
+
+	foundIssues := make(map[string]bool)
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+
+		for _, sp := range sensitivePatterns {
+			pattern := regexp.MustCompile(sp.logPattern)
+			if pattern.MatchString(line) {
+				key := fmt.Sprintf("%d_%s", i, sp.logType)
+				if !foundIssues[key] {
+					foundIssues[key] = true
+					target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+						Title:       fmt.Sprintf("%s: Sensitive Data Logged", sp.severity),
+						Description: fmt.Sprintf("%s: Found logging statement that may expose %s. EXPLOITATION: Inspect app logs/crash reports/system logs to extract credentials. Logging statements are visible in: crash reports, unified logs (Console.app), Xcode debugging. IMPACT: Credentials exposed in logs, visible to users via console, sent in crash reports.", sp.severity, sp.logType),
+						FilePath:    filepath.Base(binaryPath),
+						LineNumber:  i + 1,
+						Snippet:     line,
+					})
+				}
+			}
+		}
+	}
+}
+
+// ============================================
+// BUG BOUNTY FEATURE 4: Entitlements Configuration Analysis
+// ============================================
+
+// AnalyzeEntitlementsMisconfig checks for insecure entitlements settings
+func AnalyzeEntitlementsMisconfig(ents map[string]interface{}, target *Target) {
+	if ents == nil {
+		return
+	}
+
+	// Pattern 1: com.apple.security.get-task-allow = true (Debug flag)
+	if taskAllow, ok := ents["com.apple.security.get-task-allow"].(bool); ok && taskAllow {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"CRITICAL SECURITY ISSUE: get-task-allow = true\nDEBUG FLAG ENABLED IN PRODUCTION BUILD: This entitlement allows ANY process to attach debugger to app. EXPLOITATION: Frida/LLDB can attach and instrument code. SHOULD ONLY BE: true in debug builds, false in production. IMPACT: Complete app instrumentation, all functions can be hooked.")
+	}
+
+	// Pattern 2: Wildcard in application-identifier
+	if appId, ok := ents["application-identifier"].(string); ok {
+		if strings.Contains(appId, "*") || appId == "*" {
+			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+				fmt.Sprintf("ALERT: Wildcard in app identifier: %s - May allow execution of any bundle ID", appId))
+		}
+	}
+
+	// Pattern 3: Overpermissive file access
+	fileBrowserPaths := []string{
+		"com.apple.security.files.user-selected.read-write",
+		"com.apple.security.files.downloads.read-write",
+	}
+
+	for _, pathEnt := range fileBrowserPaths {
+		if access, ok := ents[pathEnt].(bool); ok && access {
+			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+				fmt.Sprintf("HIGH: Broad file access enabled (%s) - App can read/write all user files. Potential data exfiltration risk.", pathEnt))
+		}
+	}
+
+	// Pattern 4: Missing data protection
+	if _, ok := ents["com.apple.developer.default-data-protection"]; !ok {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"MEDIUM: Missing default data protection entitlement - Files may not have encryption at rest")
+	}
+
+	// Pattern 5: Network securityPolicy too permissive
+	if _, ok := ents["com.apple.security.network.client"]; ok {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"MEDIUM: Network client entitlement enabled - App can make outbound connections. Verify not used for data exfiltration.")
+	}
+}
+
+// ============================================
+// BUG BOUNTY FEATURE 5: Network Security Configuration Analysis
+// ============================================
+
+// AnalyzeNetworkSecurityConfig checks ATS and network security settings
+func AnalyzeNetworkSecurityConfig(info *AppInfo, ents map[string]interface{}, target *Target) {
+	if info == nil {
+		return
+	}
+
+	// Pattern 1: Advanced ATS bypass detection
+	if info.NSAppTransportSecurity != nil {
+		ats := info.NSAppTransportSecurity
+
+		// Check for NSAllowsLocalNetworking (can downgrade to HTTP locally)
+		if allowLocal, ok := ats["NSAllowsLocalNetworking"].(bool); ok && allowLocal {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:       "HIGH: NSAllowsLocalNetworking Enabled",
+				Description: "VULNERABILITY: NSAllowsLocalNetworking = true allows cleartext HTTP to local addresses. EXPLOITATION: MITM on local network (same WiFi) can intercept traffic. IMPACT: Credentials and data exposed if communicating with local servers.",
+				FilePath:    "Info.plist",
+				LineNumber:  0,
+				Snippet:     "NSAllowsLocalNetworking = true",
+			})
+		}
+
+		// Check exception domains for overpermissive settings
+		if exDomains, ok := ats["NSExceptionDomains"].(map[string]interface{}); ok {
+			for domain, settings := range exDomains {
+				if sMap, ok := settings.(map[string]interface{}); ok {
+					// Domain allows insecure HTTP
+					if insecure, ok := sMap["NSExceptionAllowsInsecureHTTPLoads"].(bool); ok && insecure {
+						target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+							Title:       fmt.Sprintf("HIGH: Cleartext HTTP Exception for %s", domain),
+							Description: fmt.Sprintf("VULNERABILITY: ATS exception allows HTTP for %s. EXPLOITATION: MITM attack intercepts traffic to/from %s. IMPACT: Credentials, API responses, and user data exposed in transit.", domain, domain),
+							FilePath:    "Info.plist",
+							LineNumber:  0,
+							Snippet:     fmt.Sprintf("NSExceptionAllowsInsecureHTTPLoads = true for %s", domain),
+						})
+					}
+
+					// Domain disables forward secrecy
+					if !disablePFS(sMap) {
+						target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+							Title:       fmt.Sprintf("MEDIUM: Forward Secrecy Disabled for %s", domain),
+							Description: "VULNERABILITY: Forward secrecy disabled - old traffic can be decrypted if key stolen. IMPACT: Historical data exposure if long-term keys compromised.",
+							FilePath:    "Info.plist",
+							LineNumber:  0,
+							Snippet:     fmt.Sprintf("NSExceptionRequiresForwardSecrecy = false for %s", domain),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Pattern 2: Certificate pinning detection
+	content, err := os.ReadFile(target.BinaryPath)
+	if err == nil {
+		data := ExtractStrings(content)
+
+		// Check for pinning indicator absence
+		pinningIndicators := []string{"AFSecurityPolicy", "ServerTrustManager", "CertificatePinning", "PublicKey.*pin"}
+		hasPinning := false
+		for _, indicator := range pinningIndicators {
+			if match, _ := regexp.MatchString(indicator, data); match {
+				hasPinning = true
+				break
+			}
+		}
+
+		// Only flag if ATS is disabled OR exceptions exist
+		hasATSBypass := false
+		if info.NSAppTransportSecurity != nil {
+			if allow, ok := info.NSAppTransportSecurity["NSAllowsArbitraryLoads"].(bool); ok && allow {
+				hasATSBypass = true
+			}
+		}
+
+		if hasATSBypass && !hasPinning {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:       "CRITICAL: ATS Disabled + No Certificate Pinning",
+				Description: "CRITICAL VULNERABILITY: App disables ATS but has no certificate pinning. EXPLOITATION: Complete MITM on any network. Attacker presents fake certificate, intercepts all HTTPS traffic. IMPACT: Complete compromise - steal credentials, modify API responses, inject malware.",
+				FilePath:    "Info.plist + Binary",
+				LineNumber:  0,
+				Snippet:     "NSAllowsArbitraryLoads = true + no pinning = total MITM vulnerability",
+			})
+		}
+	}
+}
+
+// ============================================
+// Helper Functions for Bug Bounty Detectors
+// ============================================
+
+// calculateEntropy calculates Shannon entropy of a string (0.0 to ~5.0)
+// Higher entropy (~4.5+) suggests random/encrypted data (possible secrets)
+func calculateEntropy(s string) float64 {
+	if len(s) == 0 {
+		return 0
+	}
+
+	// Count frequency of each byte
+	freqMap := make(map[rune]int)
+	for _, ch := range s {
+		freqMap[ch]++
+	}
+
+	// Calculate entropy
+	var entropy float64
+	length := float64(len(s))
+	for _, freq := range freqMap {
+		p := float64(freq) / length
+		entropy -= p * math.Log2(p)
+	}
+
+	return entropy
+}
+
+// isCommonString filters out frequently occurring non-secret strings
+func isCommonString(s string) bool {
+	commonSubstrings := []string{
+		"com.apple", "apple.com", "https://", "http://", ".com", ".org", ".net",
+		"0123456789", "abcdefghij", "version", "copyright", "license",
+		"framework", "bundle", "identifier", "application", "service",
+		"unknown", "undefined", "localhost", "127.0.0.1", "user_agent",
+	}
+
+	lower := strings.ToLower(s)
+	for _, substr := range commonSubstrings {
+		if strings.Contains(lower, substr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// disablePFS checks if forward secrecy is disabled
+func disablePFS(sMap map[string]interface{}) bool {
+	if pfs, ok := sMap["NSExceptionRequiresForwardSecrecy"].(bool); ok && !pfs {
+		return true
+	}
+	return false
 }
