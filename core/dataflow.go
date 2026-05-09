@@ -482,7 +482,7 @@ func (dfa *DataFlowAnalyzer) TraceSecretInBinary(secretValue string, source *Dat
 func (dfa *DataFlowAnalyzer) TraceIntersectsSink(trace BinaryTrace, sink *DataFlowNode) bool {
 	// Check if the trace's intermediate nodes match sink characteristics
 	for _, node := range trace.Nodes {
-		if strings.ToLower(node.Name) == strings.ToLower(sink.Name) {
+		if strings.EqualFold(node.Name, sink.Name) {
 			return true
 		}
 		// Check if function name matches sink category

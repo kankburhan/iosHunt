@@ -3,11 +3,14 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Regex patterns for secrets and other info
@@ -164,6 +167,7 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 		// URL Schemes
 		analyzeURLSchemes(info, target)
+		AnalyzeJailbreakSchemes(info, target) // NEW: Analyze Jailbreak Detection Exposure
 
 		// Permissions
 		analyzePermissions(info, target)
@@ -192,6 +196,7 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 			// Phase 23: Deep Links
 			analyzeDeepLinks(info, ents, target)
+			AnalyzeUniversalLinksAASA(ents, target) // NEW: Live AASA Wildcard Check
 
 			// NEW FEATURE 2: Keychain Sharing Analysis
 			AnalyzeKeychainSharingRisks(ents, target)
@@ -210,9 +215,7 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 		AnalyzeNSCodingSecurity(binaryPath, target)
 
 		// NEW FEATURE 3: URL Scheme Validation Analysis
-		if info != nil {
-			AnalyzeURLSchemeValidation(info, binaryPath, target)
-		}
+		AnalyzeURLSchemeValidation(info, binaryPath, target)
 
 		// NEW FEATURE 4: Background Activity Leak Detection
 		DetectBackgroundActivityLeaks(binaryPath, target)
@@ -226,6 +229,11 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 
 		// Feature 3: Logging data leaks (credentials in log statements)
 		AnalyzeLoggingStatements(binaryPath, target)
+
+		// Call scanHardeningSignatures for binary content
+		if content, err := os.ReadFile(binaryPath); err == nil {
+			scanHardeningSignatures(string(content), binaryPath, target)
+		}
 	}
 
 	// 2. Scan binary and other files
@@ -322,6 +330,12 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 	target.Report.Findings.CodeIssues = deduplicateFindings(target.Report.Findings.CodeIssues)
 	target.Report.Findings.DeepLinks.Schemes = deduplicate(target.Report.Findings.DeepLinks.Schemes)
 	target.Report.Findings.DeepLinks.Universal = deduplicate(target.Report.Findings.DeepLinks.Universal)
+	
+	// NEW: Extract deep link routes from UI strings before finishing
+	ExtractDeepLinkRoutes(target)
+	if len(target.Report.Findings.DeepLinks.Routes) > 0 {
+		target.Report.Findings.DeepLinks.Routes = deduplicate(target.Report.Findings.DeepLinks.Routes)
+	}
 
 	// NEW: Data Flow Analysis (Phase 24 - String & Binary Level)
 	// This analyzes how secrets flow through the app from sources to sinks
@@ -345,18 +359,40 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 func analyzeATS(info *AppInfo, target *Target) {
 	if info.NSAppTransportSecurity != nil {
 		if allows, ok := info.NSAppTransportSecurity["NSAllowsArbitraryLoads"].(bool); ok && allows {
-			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations, "ATS Disabled (NSAllowsArbitraryLoads = true) - Critical Risk")
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:           "HIGH: ATS Disabled (NSAllowsArbitraryLoads = true)",
+				Severity:        "High",
+				Description:     "App Transport Security (ATS) is disabled, allowing insecure network connections. This is a critical risk for production apps.",
+				FilePath:        "Info.plist",
+				Snippet:         "NSAllowsArbitraryLoads = true",
+				ExploitScenario: "Attacker can intercept unencrypted traffic, perform MITM attacks, and steal sensitive data.",
+				Recommendation:  "Remove NSAllowsArbitraryLoads or set to false. Use HTTPS for all network requests.",
+			})
 		}
 		if exDomains, ok := info.NSAppTransportSecurity["NSExceptionDomains"].(map[string]interface{}); ok {
 			for domain, settings := range exDomains {
-				// Check for NSExceptionAllowsInsecureHTTPLoads in domain settings
 				if sMap, ok := settings.(map[string]interface{}); ok {
 					if insecure, ok := sMap["NSExceptionAllowsInsecureHTTPLoads"].(bool); ok && insecure {
-						target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations, fmt.Sprintf("ATS Exception: Insecure HTTP allowed for domain %s", domain))
+						target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+							Title:           "HIGH: ATS Exception Allows Insecure HTTP",
+							Severity:        "High",
+							Description:     fmt.Sprintf("ATS exception allows insecure HTTP for domain %s.", domain),
+							FilePath:        "Info.plist",
+							Snippet:         fmt.Sprintf("NSExceptionAllowsInsecureHTTPLoads = true for domain %s", domain),
+							ExploitScenario: "Attacker can intercept HTTP traffic to this domain, leading to credential or data theft.",
+							Recommendation:  "Remove NSExceptionAllowsInsecureHTTPLoads or use HTTPS for this domain.",
+						})
 					}
-					// Check for NSExceptionRequiresForwardSecrecy = false
 					if pfs, ok := sMap["NSExceptionRequiresForwardSecrecy"].(bool); ok && !pfs {
-						target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations, fmt.Sprintf("ATS Weakness: Forward Secrecy disabled for domain %s", domain))
+						target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+							Title:           "MEDIUM: ATS Weakness - Forward Secrecy Disabled",
+							Severity:        "Medium",
+							Description:     fmt.Sprintf("Forward Secrecy is disabled for domain %s.", domain),
+							FilePath:        "Info.plist",
+							Snippet:         fmt.Sprintf("NSExceptionRequiresForwardSecrecy = false for domain %s", domain),
+							ExploitScenario: "If TLS is compromised, past sessions can be decrypted, increasing risk of data exposure.",
+							Recommendation:  "Enable Forward Secrecy for all domains by setting NSExceptionRequiresForwardSecrecy to true.",
+						})
 					}
 				}
 			}
@@ -761,6 +797,135 @@ func LoadPatterns(rootDir string) (map[string]*regexp.Regexp, error) {
 	return patterns, nil
 }
 
+// --- NEW FEATURES: Real Impact Analysis (VUL-02) ---
+
+// AnalyzeUniversalLinksAASA performs dynamic analysis on associated domains to find wildcard path misconfigurations
+func AnalyzeUniversalLinksAASA(ents map[string]interface{}, target *Target) {
+	domains := target.Report.Findings.DeepLinks.Universal
+	if len(domains) == 0 {
+		return
+	}
+
+	fmt.Printf("    Checking Apple App Site Association (AASA) for %d domains...\n", len(domains))
+	client := http.Client{Timeout: 5 * time.Second}
+
+	for _, domainStr := range domains {
+		// Domains usually come as "applinks:example.com"
+		parts := strings.SplitN(domainStr, ":", 2)
+		domain := domainStr
+		if len(parts) == 2 {
+			domain = parts[1]
+		}
+		// Skip localhost/testing domains
+		if strings.Contains(domain, "localhost") || strings.Contains(domain, "127.0.0.1") {
+			continue
+		}
+
+		u := "https://" + domain + "/.well-known/apple-app-site-association"
+		resp, err := client.Get(u)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
+
+		// Look for wildcard paths in raw JSON
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "\"*\"") && (strings.Contains(bodyStr, "paths") || strings.Contains(bodyStr, "components")) {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:           "HIGH: Universal Links Allow All Paths (AASA Wildcard)",
+				Severity:        "High",
+				Description:     fmt.Sprintf("The live AASA server for %s is configured with a wildcard (*) allowing all paths to trigger the app.", domain),
+				FilePath:        "Server-Side (AASA)",
+				LineNumber:      0,
+				Snippet:         fmt.Sprintf("Live URL: %s", u),
+				ExploitScenario: fmt.Sprintf("An attacker can craft a link like https://%s/attack/payload?param=1 that will immediately open the iOS app instead of the website, leading to Deep Link exploitation if handler sanitization is weak.", domain),
+				Recommendation:  "Restrict Universal Link paths explicitly in the AASA file.",
+			})
+		}
+	}
+}
+
+// AnalyzeJailbreakSchemes checks Info.plist LSApplicationQueriesSchemes for known jailbreak detection evasion surfaces
+func AnalyzeJailbreakSchemes(info *AppInfo, target *Target) {
+	if info == nil || len(info.LSApplicationQueriesSchemes) == 0 {
+		return
+	}
+
+	knownJBSchemes := []string{"cydia", "sileo", "zbra", "undecimus", "filza", "activator"}
+	foundJB := []string{}
+
+	for _, queried := range info.LSApplicationQueriesSchemes {
+		q := strings.ToLower(queried)
+		for _, known := range knownJBSchemes {
+			if q == known {
+				foundJB = append(foundJB, queried)
+			}
+		}
+	}
+
+	if len(foundJB) > 0 {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations, 
+			fmt.Sprintf("INFO: Jailbreak Detection Logic Exposed. Queried schemes: %v. Attackers can easily bypass this via canOpenURL: hooking.", foundJB))
+	}
+}
+
+// ExtractDeepLinkRoutes scans Localizable.strings for clues about application routing and deep link endpoints
+func ExtractDeepLinkRoutes(target *Target) {
+	fmt.Println("    Enumerating deep link routes from UI strings...")
+	
+	err := filepath.Walk(target.AppPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		// Prioritize English or Base to avoid duplication from multiple translations
+		if strings.HasSuffix(path, ".strings") && (strings.Contains(path, "en.lproj") || strings.Contains(path, "Base.lproj")) {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+
+			// We are looking for typical keys: feature_screen_name or nav_destination
+			// Regex for Objective-C/Swift .strings file format
+			lines := strings.Split(string(content), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "\"") && strings.Contains(line, "=") {
+					parts := strings.Split(line, "\"")
+					if len(parts) >= 3 {
+						key := parts[1]
+						keyLower := strings.ToLower(key)
+						
+						// Heuristics for navigation keys
+						if strings.Contains(keyLower, "nav_") || strings.Contains(keyLower, "screen_") || strings.Contains(keyLower, "deep") {
+							// Example: "nav_payment_transfer" -> "payment/transfer"
+							split := strings.Split(keyLower, "_")
+							if len(split) >= 2 {
+								route := strings.Join(split[:2], "/")
+								target.Report.Findings.DeepLinks.Routes = append(target.Report.Findings.DeepLinks.Routes, route)
+							}
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		fmt.Printf("    [!] Error during route enumeration: %v\n", err)
+	}
+}
+
 // IsBinary checks if the content appears to be binary
 func IsBinary(content []byte) bool {
 	// Check first 1024 bytes for null character
@@ -891,30 +1056,76 @@ func AnalyzeKeychainSharingRisks(ents map[string]interface{}, target *Target) {
 
 				// IMPROVED: Risk 1 - Sharing with app groups WITH POC
 				if strings.Contains(groupStr, "group.") {
-					target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
-						fmt.Sprintf("VULNERABILITY: Keychain Shared via App Groups: %s\nEXPLOITATION: Create attacker app with same app group ID. Attacker app can read/write all keychain items. POC: SecItemCopyMatching(queryForGroup) returns all tokens, passwords.\nIMPACT: Auth token theft, account takeover, cross-app data theft", groupStr))
+					target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+						Title:           "HIGH: Keychain Shared via App Groups",
+						Severity:        "High",
+						Description:     fmt.Sprintf("Keychain is shared via app group: %s. Attacker app with same app group ID can read/write all keychain items.", groupStr),
+						FilePath:        "Entitlements.plist",
+						Snippet:         fmt.Sprintf("keychain-access-groups: %s", groupStr),
+						ExploitScenario: "Attacker app with same app group ID can access tokens and passwords via SecItemCopyMatching.",
+						Recommendation:  "Restrict app group usage and avoid sharing sensitive keychain items across groups.",
+					})
 				}
 
 				// IMPROVED: Risk 2 - Wildcard sharing CRITICAL!
 				if strings.Contains(groupStr, "*") {
-					target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
-						fmt.Sprintf("CRITICAL: Keychain shared with WILDCARD: %s\nEXPLOITATION: ANY app on device can access keychain. Attacker app reads all stored secrets, tokens, passwords. POC: Simple query to keychain with group ID = attacker gets everything.\nIMPACT: MAXIMUM RISK - Complete compromise of stored secrets", groupStr))
+					target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+						Title:           "CRITICAL: Keychain Shared with Wildcard",
+						Severity:        "High",
+						Description:     fmt.Sprintf("Keychain is shared with wildcard group: %s. ANY app on device can access keychain.", groupStr),
+						FilePath:        "Entitlements.plist",
+						Snippet:         fmt.Sprintf("keychain-access-groups: %s", groupStr),
+						ExploitScenario: "Attacker app queries keychain with wildcard group and gets all secrets.",
+						Recommendation:  "Remove wildcard from keychain-access-groups. Use explicit group IDs only.",
+					})
 				}
 
 				// IMPROVED: Risk 3 - Team ID sharing WITH POC
 				if strings.HasPrefix(groupStr, "TEAMID.") || strings.Contains(groupStr, "$(TeamIdentifierPrefix)") {
-					target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
-						fmt.Sprintf("HIGH: Keychain Shared by Team ID: %s\nEXPLOITATION: All apps from same developer team can access. Attacker's app (same team) reads secrets. POC: Create app with same team ID, read keychain.\nIMPACT: Data accessible to developer's other apps (potentially malicious)", groupStr))
+					target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+						Title:           "HIGH: Keychain Shared by Team ID",
+						Severity:        "High",
+						Description:     fmt.Sprintf("Keychain is shared by Team ID: %s. All apps from same developer team can access.", groupStr),
+						FilePath:        "Entitlements.plist",
+						Snippet:         fmt.Sprintf("keychain-access-groups: %s", groupStr),
+						ExploitScenario: "Attacker's app (same team) reads secrets from keychain.",
+						Recommendation:  "Limit team-based sharing and audit apps with access to shared keychain.",
+					})
 				}
 			}
 		}
 	}
 
-	// IMPROVED: Check for weak access level combined with app groups
+	// Severity downgrade logic for App Groups + Keychain sharing
+	extensionPresent := false
+	if ents != nil {
+		if _, ok := ents["NSExtension"]; ok {
+			extensionPresent = true
+		}
+	}
 	if appGroups, ok := ents["com.apple.security.application-groups"]; ok {
 		if appGroupList, ok := appGroups.([]interface{}); ok && len(appGroupList) > 0 {
-			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
-				"HIGH RISK: App Groups Enabled + Keychain Sharing\nEXPLOITATION: Extensions and other grouped apps access shared keychain. Widget/extension reads auth tokens. POC: Access shared container, read serialized tokens.\nIMPACT: Extension isolation broken, sensitive data shared cross-app")
+			severity := "Medium"
+			title := "App Groups Enabled + Keychain Sharing"
+			description := "App Groups and Keychain sharing detected."
+			exploit := "Extensions and grouped apps may access shared keychain. Widget/extension can read auth tokens."
+			recommendation := "Audit extension and app group usage. Restrict sensitive data sharing."
+			if extensionPresent {
+				severity = "High"
+				title = "HIGH RISK: App Groups + Keychain Sharing + Extension"
+				description = "App Groups, Keychain sharing, and extension presence detected. High risk of sensitive data exposure."
+				exploit = "Extension can access shared container and read serialized tokens."
+				recommendation = "Isolate sensitive data, restrict extension access, and review app group entitlements."
+			}
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:           title,
+				Severity:        severity,
+				Description:     description,
+				FilePath:        "Entitlements.plist",
+				Snippet:         "App Groups + Keychain Sharing",
+				ExploitScenario: exploit,
+				Recommendation:  recommendation,
+			})
 		}
 	}
 }
@@ -984,11 +1195,14 @@ func AnalyzeURLSchemeValidation(info *AppInfo, binaryPath string, target *Target
 				!strings.Contains(data, "allowlist") &&
 				strings.Contains(data, scheme) {
 				target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
-					Title:       fmt.Sprintf("Missing Host Whitelist: %s://", scheme),
-					Description: fmt.Sprintf("VULNERABILITY: No host/origin validation on '%s://' handler. EXPLOITATION: '%s://profile?remote_user=admin' OR '%s://deeplink?redirect=http://attacker.com/phishing'. IMPACT: Access unintended features, redirect attacks.", scheme, scheme, scheme),
-					FilePath:    filepath.Base(binaryPath),
-					LineNumber:  0,
-					Snippet:     fmt.Sprintf("POC: %s://admin?elevation_required=false OR %s://bypass?security_check=no", scheme, scheme),
+					Title:           fmt.Sprintf("HIGH: Missing Host/Path Allowlist for URL Scheme: %s://", scheme),
+					Severity:        "High",
+					Description:     fmt.Sprintf("No host/path allowlist validation for URL scheme '%s://'. This can lead to open redirects, parameter injection, or logic bypass.", scheme),
+					FilePath:        filepath.Base(binaryPath),
+					LineNumber:      0,
+					Snippet:         fmt.Sprintf("POC: %s://admin?elevation_required=false OR %s://bypass?security_check=no", scheme, scheme),
+					ExploitScenario: "Attacker crafts malicious deep link to exploit missing validation, redirecting users or bypassing app logic.",
+					Recommendation:  "Implement strict host/path allowlist validation for all custom URL scheme handlers.",
 				})
 			}
 		}
@@ -1152,12 +1366,15 @@ func AnalyzeHardcodedSecrets(binaryPath string, target *Target) {
 				if !foundSecrets[key] {
 					foundSecrets[key] = true
 					target.Report.Findings.Secrets = append(target.Report.Findings.Secrets, Finding{
-						Title:       "HIGH ENTROPY STRING (Possible Hardcoded Secret)",
-						Description: fmt.Sprintf("SUSPICIOUS: Found high-entropy string (entropy: %.2f). Pattern indicates hardcoded secret: API key, token, password, or encryption key. Verify string '%s' is not sensitive data. IMPACT: If secret is exposed, attacker can authenticate as app.", entropy, line),
-						FilePath:    filepath.Base(binaryPath),
-						LineNumber:  0,
-						Snippet:     line,
-						Value:       line,
+						Title:           "HIGH ENTROPY STRING (Possible Hardcoded Secret)",
+						Severity:        "High",
+						Description:     fmt.Sprintf("SUSPICIOUS: Found high-entropy string (entropy: %.2f). Pattern indicates hardcoded secret: API key, token, password, or encryption key. Verify string '%s' is not sensitive data.", entropy, line),
+						FilePath:        filepath.Base(binaryPath),
+						LineNumber:      0,
+						Snippet:         line,
+						Value:           line,
+						ExploitScenario: "Attacker extracts hardcoded secret from binary and uses it to access backend services or user accounts.",
+						Recommendation:  "Remove hardcoded secrets from code. Use secure storage or environment variables.",
 					})
 				}
 			}
@@ -1166,8 +1383,8 @@ func AnalyzeHardcodedSecrets(binaryPath string, target *Target) {
 
 	// Known secret patterns (extends existing secret scanning)
 	additionalPatterns := []struct {
-		name    string
-		pattern *regexp.Regexp
+		name     string
+		pattern  *regexp.Regexp
 		severity string
 	}{
 		{
@@ -1276,8 +1493,15 @@ func AnalyzeEntitlementsMisconfig(ents map[string]interface{}, target *Target) {
 
 	// Pattern 1: com.apple.security.get-task-allow = true (Debug flag)
 	if taskAllow, ok := ents["com.apple.security.get-task-allow"].(bool); ok && taskAllow {
-		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
-			"CRITICAL SECURITY ISSUE: get-task-allow = true\nDEBUG FLAG ENABLED IN PRODUCTION BUILD: This entitlement allows ANY process to attach debugger to app. EXPLOITATION: Frida/LLDB can attach and instrument code. SHOULD ONLY BE: true in debug builds, false in production. IMPACT: Complete app instrumentation, all functions can be hooked.")
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "HIGH: Debuggable Build Enabled (get-task-allow = true)",
+			Severity:        "High",
+			Description:     "The entitlement 'get-task-allow' is enabled, allowing any process to attach a debugger to the app. This is a critical risk for production builds.",
+			FilePath:        "Entitlements.plist",
+			Snippet:         "com.apple.security.get-task-allow = true",
+			ExploitScenario: "Attackers can use Frida/LLDB to instrument and hook all app functions, bypassing security controls.",
+			Recommendation:  "Set 'get-task-allow' to false in production builds. Only enable for debug builds.",
+		})
 	}
 
 	// Pattern 2: Wildcard in application-identifier

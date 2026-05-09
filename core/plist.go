@@ -24,7 +24,8 @@ type AppInfo struct {
 	} `plist:"CFBundleURLTypes"`
 
 	// Enhanced Analysis Fields (Phase 15)
-	NSExtensions map[string]interface{} `plist:"NSExtension"`
+	LSApplicationQueriesSchemes []string               `plist:"LSApplicationQueriesSchemes"`
+	NSExtensions                map[string]interface{} `plist:"NSExtension"`
 	// We can't easily map all NS*UsageDescription because dynamic keys.
 	// But we can iterate the raw map later if we had it, or define common ones.
 	// For now, let's map the raw map to access these.

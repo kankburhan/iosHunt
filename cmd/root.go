@@ -19,6 +19,11 @@ It handles downloading IPA, injecting Frida gadgets, resigning, installing,
 and setting up the runtime environment.`,
 	Args: cobra.MaximumNArgs(1),
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// MCP server mode: skip banner and dependency checks (stdout is JSON-RPC)
+		if cmd.Name() == "mcp" {
+			return
+		}
+
 		// Skip update check for update command itself or if offline flag is set (if we had one)
 		if cmd.Name() != "update" && cmd.Name() != "completion" {
 			go core.CheckUpdate()
@@ -26,13 +31,13 @@ and setting up the runtime environment.`,
 
 		// Banner
 		fmt.Println(`
-    _       _____  __  __            _   
-   (_)___  / ___/ / / / /_  ______  / |_ 
+    _       _____  __  __            _
+   (_)___  / ___/ / / / /_  ______  / |_
   / / __ \ \__ \ / /_/ / / / / __ \/ __/
- / / /_/ /___/ // __  / /_/ / / / / /_  
-/_/\____//____//_/ /_/\__,_/_/ /_/\__/  
-                                         
-   One command iOS pentesting pipeline                                      
+ / / /_/ /___/ // __  / /_/ / / / / /_
+/_/\____//____//_/ /_/\__,_/_/ /_/\__/
+
+   One command iOS pentesting pipeline
 		`)
 
 		// Initialize and check dependencies

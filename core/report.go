@@ -48,6 +48,7 @@ type Report struct {
 		DeepLinks struct {
 			Schemes   []string `json:"schemes"`
 			Universal []string `json:"universal_links"`
+			Routes    []string `json:"routes,omitempty"` // NEW: Enumerated routes from localizable strings
 		} `json:"deep_links"`
 
 		// NEW: Data Flow Analysis (Phase 24)
@@ -58,16 +59,47 @@ type Report struct {
 
 // Finding represents a vulnerability or interesting artifact with context
 type Finding struct {
-	Title          string   `json:"title"`
-	Description    string   `json:"description,omitempty"`
-	FilePath       string   `json:"file_path"`
-	LineNumber     int      `json:"line_number,omitempty"`
-	Snippet        string   `json:"snippet,omitempty"`
-	Value          string   `json:"value,omitempty"`            // The specific secret string
-	DataFlowNodeID string   `json:"dataflow_node_id,omitempty"` // NEW: Reference to TaintGraph node
-	IsTaintSource  bool     `json:"is_taint_source,omitempty"`  // NEW: Is this a SOURCE?
-	IsTaintSink    bool     `json:"is_taint_sink,omitempty"`    // NEW: Is this a SINK?
-	TaintPaths     []string `json:"taint_paths,omitempty"`      // NEW: Path IDs flowing through this
+	IsKnownBaseline bool     `json:"is_known_baseline,omitempty"` // Mark if finding is from baseline
+	ID              string   `json:"id,omitempty"`                // Stable ID (sha1 of file:line:title)
+	Title           string   `json:"title"`
+	Description     string   `json:"description,omitempty"`
+	FilePath        string   `json:"file_path"`
+	LineNumber      int      `json:"line_number,omitempty"`
+	Snippet         string   `json:"snippet,omitempty"`
+	Value           string   `json:"value,omitempty"`            // The specific secret string
+	Severity        string   `json:"severity,omitempty"`         // High/Medium/Low/Info
+	Category        string   `json:"category,omitempty"`         // secret/url/crypto/storage/code/...
+	ExploitScenario string   `json:"exploit_scenario,omitempty"` // Short example exploit
+	Recommendation  string   `json:"recommendation,omitempty"`   // Concrete fix/action
+	DataFlowNodeID  string   `json:"dataflow_node_id,omitempty"`
+	IsTaintSource   bool     `json:"is_taint_source,omitempty"`
+	IsTaintSink     bool     `json:"is_taint_sink,omitempty"`
+	TaintPaths      []string `json:"taint_paths,omitempty"`
+
+	// --- Live Verification (Phase 27) ---
+	LiveVerified  bool       `json:"live_verified,omitempty"`  // Confirmed via live probe?
+	LiveStatus    string     `json:"live_status,omitempty"`    // CONFIRMED / FAILED / UNREACHABLE / SKIPPED
+	LiveDetails   string     `json:"live_details,omitempty"`   // Raw probe output
+	LiveProbedAt  string     `json:"live_probed_at,omitempty"` // RFC3339 timestamp
+
+	// --- Dynamic Reproduction (Phase 28) ---
+	Reproduced    bool       `json:"reproduced,omitempty"`     // Confirmed at runtime via Frida?
+	ReproStatus   string     `json:"repro_status,omitempty"`   // REPRODUCED / NOT_TRIGGERED / FAILED / SKIPPED
+	ReproOutput   string     `json:"repro_output,omitempty"`   // Frida hook output / runtime evidence
+	ReproScript   string     `json:"repro_script,omitempty"`   // Path to generated frida script
+	ReproDuration int        `json:"repro_duration,omitempty"` // Hook duration (sec)
+
+	// --- Evidence (Phase 29) ---
+	Evidence      []Evidence `json:"evidence,omitempty"`       // Screenshots, pcaps, dumps
+}
+
+// Evidence is a piece of proof attached to a finding (file path + meta)
+type Evidence struct {
+	Type        string `json:"type"`         // screenshot / network / hook_log / file_dump / curl_output
+	Path        string `json:"path"`         // Path to artifact on disk
+	Description string `json:"description,omitempty"`
+	CapturedAt  string `json:"captured_at,omitempty"`
+	Size        int64  `json:"size,omitempty"`
 }
 
 func NewReport(target string) *Report {
@@ -234,8 +266,8 @@ func (r *Report) SaveMarkdown(path string) error {
 		fmt.Fprintf(f, "\n")
 	}
 
-	// Deep Links (Phase 23)
-	if len(r.Findings.DeepLinks.Schemes) > 0 || len(r.Findings.DeepLinks.Universal) > 0 {
+	// Deep Links (Phase 23 + Real Impact Upgrades)
+	if len(r.Findings.DeepLinks.Schemes) > 0 || len(r.Findings.DeepLinks.Universal) > 0 || len(r.Findings.DeepLinks.Routes) > 0 {
 		fmt.Fprintf(f, "## Deep Links & Entry Points\n")
 		if len(r.Findings.DeepLinks.Schemes) > 0 {
 			fmt.Fprintf(f, "### Custom URL Schemes\n")
@@ -248,6 +280,14 @@ func (r *Report) SaveMarkdown(path string) error {
 			fmt.Fprintf(f, "### Universal Links (Associated Domains)\n")
 			for _, u := range r.Findings.DeepLinks.Universal {
 				fmt.Fprintf(f, "- `%s`\n", u)
+			}
+			fmt.Fprintf(f, "\n")
+		}
+		if len(r.Findings.DeepLinks.Routes) > 0 {
+			fmt.Fprintf(f, "### Guessed Deep Link Routes (From UI Strings)\n")
+			fmt.Fprintf(f, "> **Warning:** These routes are reconstructed from Localizable.strings and may indicate sensitive endpoints accessible via deep links.\n")
+			for _, r := range r.Findings.DeepLinks.Routes {
+				fmt.Fprintf(f, "- `%s`\n", r)
 			}
 			fmt.Fprintf(f, "\n")
 		}
