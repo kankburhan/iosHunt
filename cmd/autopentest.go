@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"ioshunt/core"
+	"github.com/kankburhan/iosHunt/core"
 	"os"
 
 	"github.com/spf13/cobra"

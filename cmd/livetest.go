@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"ioshunt/core"
+	"github.com/kankburhan/iosHunt/core"
 
 	"github.com/spf13/cobra"
 )

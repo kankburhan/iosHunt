@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"ioshunt/core"
+	"github.com/kankburhan/iosHunt/core"
 )
 
 // loadLatestReport finds the most recent report.json for a bundle ID

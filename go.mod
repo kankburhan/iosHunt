@@ -1,4 +1,4 @@
-module ioshunt
+module github.com/kankburhan/iosHunt
 
 go 1.24.1
 

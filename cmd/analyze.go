@@ -3,7 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"ioshunt/core"
+	"github.com/kankburhan/iosHunt/core"
 	"os"
 	"path/filepath"
 	"sort"
