@@ -86,11 +86,23 @@ Layered installer for stock iOS — no jailbreak required.
 brew install libimobiledevice ideviceinstaller ios-deploy
 ```
 
+### Quick Install (via go install)
+```bash
+# Install latest release
+go install github.com/kankburhan/iosHunt@latest
+
+# Verify installation
+ioshunt --help
+```
+
 ### Build from Source
 ```bash
-git clone https://github.com/mburhan/ioshunt.git
-cd ioshunt
+git clone https://github.com/kankburhan/iosHunt.git
+cd iosHunt
 go install
+
+# Or directly from repo
+go install github.com/kankburhan/iosHunt@master
 ```
 
 ## Usage
