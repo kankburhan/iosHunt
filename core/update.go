@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	CurrentVersion = "v1.14.2"
+	CurrentVersion = "v1.15.0"
 	RepoOwner      = "kankburhan"
 	RepoName       = "iosHunt"
 	GitHubAPI      = "https://api.github.com/repos/" + RepoOwner + "/" + RepoName + "/releases/latest"

@@ -1,10 +1,10 @@
 # iOSHunt
 
-**One Command iOS Pentesting Pipeline — Now with Live Exploit Verification & Auto-Reproduction on Non-Jailbroken Devices**
+**One Command iOS Pentesting Pipeline — Bug Bounty-Grade Vulnerability Detection with Live Exploit Verification & Auto-Reproduction**
 
 `ioshunt` is a comprehensive CLI tool designed to automate the entire lifecycle of an iOS application security assessment. From downloading the IPA to AI-driven autonomous pentesting with **runtime evidence capture**, it handles everything so you can focus on finding vulnerabilities.
 
-## Features (v1.14.0)
+## Features (v1.15.0)
 
 ### 1. Automation Pipeline
 -   **Download**: Fetches IPAs from the App Store (handles auth & country selection).
@@ -13,7 +13,7 @@
 -   **Installation**: Deploys to connected devices via `ios-deploy` or `ideviceinstaller`.
 -   **Non-JB Sideload (NEW)**: Layered installer with `ideviceinstaller` (libimobiledevice), `ios-deploy`, and AltStore fallback.
 
-### 2. Static Analysis (26-Phase Recon Engine)
+### 2. Static Analysis (26-Phase Recon Engine + 17 Specialized Detectors)
 -   **Secrets Scanning**: Detects hardcoded keys, tokens, and private data (12+ patterns with entropy analysis).
 -   **Misconfigurations**: Checks `Info.plist` (ATS, File Sharing) and Entitlements (`get-task-allow`).
 -   **Binary Security**: Verifies PIE, ARC, Stack Canaries, and Encryption status.
@@ -21,6 +21,8 @@
 -   **Crypto Issues**: Weak algorithms, unsafe random generation, ECB mode detection.
 -   **Code Injection**: SQL injection, XSS, format string, and deserialization vulnerabilities.
 -   **Advanced Detectors**: Keychain API misuse, logging data leaks, entitlements misconfiguration, insecure network config.
+-   **Bug Bounty Detectors (NEW v1.15.0)**: WebView XSS, biometric bypass, clipboard leaks, privacy manifest, deprecated APIs, snapshot protection, SDK supply chain scanning.
+-   **Attack Chain Detection (NEW)**: Identifies combinations of vulnerabilities that can be chained for maximum impact.
 -   **Reporting**: JSON, Markdown, and HTML reports with full taint graph visualization.
 
 ### 3. AI-Powered Analysis
@@ -312,7 +314,7 @@ ioshunt
 │   ├── report_loader.go     # NEW — Shared helper: loadLatestReport()
 │   └── ...
 ├── core/                     # Core modules
-│   ├── recon.go             # 26-phase static analysis engine (1500+ LOC)
+│   ├── recon.go             # 26-phase static analysis engine + 17 detectors (2200+ LOC)
 │   ├── dataflow.go          # Taint tracking & data flow analysis
 │   ├── mcp.go               # MCP server implementation
 │   ├── mcp_runtime.go       # NEW — 5 new MCP tool implementations

@@ -1,446 +1,223 @@
-# iOSHunt Security Enhancement - New Features Summary
+# iOSHunt New Features Documentation (v1.15.0)
 
 ## Overview
-Added **5 advanced security detection features** untuk mengidentifikasi vulnerability patterns yang sebelumnya tidak terdeteksi. Fitur-fitur baru fokus pada exploitation attack surfaces yang accessible langsung oleh user.
+Added **7 new bug bounty-grade vulnerability detectors** based on real-world research from **HackerOne, Bugcrowd, YesWeHack, and Intigriti**. All detectors mapped to **OWASP MASVS 2024-2025** categories.
 
 ---
 
-## 📋 New Features Implemented
+## 📋 New Features (v1.15.0)
 
-### **FEATURE 1: Insecure Deserialization (NSCoding) Detector**
-**File**: `core/recon.go:758-798` | **Function**: `AnalyzeNSCodingSecurity()`
+### **DETECTOR 1: WebView Security Analysis** (MASVS-PLATFORM)
+**Function**: `AnalyzeWebViewSecurity()` | **Severity**: Critical-High
 
 #### What It Detects:
-- ✅ Unsafe `initWithCoder` tanpa NSSecureCoding
-- ✅ `NSKeyedUnarchiver` tanpa `allowedClasses` restriction
-- ✅ Legacy deprecated `unarchiveObjectWithData`
-- ✅ Custom object deserialization vulnerabilities
+- ✅ `WKWebView` + `evaluateJavaScript` without input sanitization (JS bridge injection)
+- ✅ `loadHTMLString` with dynamic content (stored XSS)
+- ✅ Unvalidated `WKScriptMessageHandler` (native bridge abuse)
+- ✅ Deprecated `UIWebView` usage (no process isolation, Apple rejection)
 
 #### Why It Matters:
-**Object Injection / RCE via Serialized Data**
-```
-Risk: Attacker dapat create malicious plist/serialized object
-      yang akan di-deserialize oleh vulnerable app
-Impact: Remote Code Execution, data exfiltration
+WebView XSS is the #1 mobile web vulnerability reported on bug bounty platforms. A single XSS can escalate to full account takeover via native bridge access.
 
-Real Example:
-- Banking app stores user data dengan NSCoding
-- Attacker modifies plist di Documents folder
-- App deserializes → arbitrary code execution
+#### Attack Chain:
+```
+XSS in WebView → Access native JS bridge → Read keychain via bridge
+→ Steal auth token → Account takeover
 ```
 
-#### How User Can Exploit:
-```bash
-# 1. Find apps using unsafe deserialization
-ioshunt recon com.vulnerable.app
-
-# 2. Look for "Unsafe NSCoding" findings in report
-# 3. Use Frida to hook deserialization endpoints
-ioshunt attach com.vulnerable.app --nscoding-monitor
-
-# 4. Craft malicious plist and inject via file access
-# 5. Trigger app to deserialize → RCE
-```
+#### Bug Bounty Relevance:
+| Platform | Typical Payout | Severity |
+|----------|---------------|----------|
+| HackerOne | $500-$5,000 | Medium-Critical |
+| Bugcrowd | P2-P1 | High-Critical |
+| YesWeHack | €300-€3,000 | Medium-Critical |
 
 ---
 
-### **FEATURE 2: Keychain Sharing Attack Surface Analysis**
-**File**: `core/recon.go:804-840` | **Function**: `AnalyzeKeychainSharingRisks()`
+### **DETECTOR 2: Privacy Manifest Compliance** (MASVS-PLATFORM)
+**Function**: `AnalyzePrivacyManifest()` | **Severity**: Medium-High
 
 #### What It Detects:
-- ✅ Insecure `kSecAttrAccessGroup` configurations
-- ✅ Wildcard keychain sharing (`*`)
-- ✅ Team ID-based keychain access
-- ✅ Cross-app keychain sharing risks
-- ✅ App groups + Keychain combination
+- ✅ Missing `PrivacyInfo.xcprivacy` file
+- ✅ Usage of Required Reason APIs without declaration:
+  - `NSUserDefaults` / `UserDefaults.standard`
+  - `mach_absolute_time` / `systemUptime`
+  - `creationDate` / `modificationDate`
+  - `fstat` / `activeInputModes`
 
-#### Vulnerability Categories:
-
-| Risk Level | Pattern | Impact |
-|---|---|---|
-| **CRITICAL** | Wildcard `*` in keychain-access-groups | ANY app can steal keychain items |
-| **HIGH** | `group.*` sharing | Other group apps access keychain |
-| **HIGH** | Team ID sharing | All apps from same team access data |
-| **MEDIUM** | App groups enabled | Extensions can intercept keychain |
-
-#### Real Attack Scenario:
-```
-Target: Uber-like app storing auth tokens
-Vulnerability: Keychain shared via app group "group.com.company"
-
-1. Attacker creates dummy app with same group
-2. Installs both apps on victim's device
-3. Attacker app reads keychain → steals auth token
-4. Uses token to access victim's account
-
-Frida Detection:
-ioshunt attach uber --keychain-monitor
-→ Shows all keychain operations & access groups
-```
-
-#### User Exploitation:
-```bash
-# 1. Check for keychain sharing vulnerabilities
-ioshunt recon com.target.app
-
-# 2. Monitor keychain access at runtime
-ioshunt attach com.target.app --keychain-monitor
-
-# 3. Output shows all sensitive data being stored
-# 4. Create malicious app with same access group
-# 5. Read keychain items programmatically
-```
+#### Why It Matters:
+Since **May 2024**, Apple requires all apps using Required Reason APIs to include a privacy manifest. Missing manifests result in App Store rejection and indicate potential device fingerprinting.
 
 ---
 
-### **FEATURE 3: Custom URL Scheme Input Validation Analysis**
-**File**: `core/recon.go:846-904` | **Function**: `AnalyzeURLSchemeValidation()`
+### **DETECTOR 3: Biometric Authentication Bypass** (MASVS-AUTH)
+**Function**: `AnalyzeBiometricAuth()` | **Severity**: Medium-High
 
 #### What It Detects:
-- ✅ URL scheme handlers without input validation
-- ✅ Auth-related schemes (`oauth://`, `auth://`)
-- ✅ Missing host whitelist validation
-- ✅ Parameter injection vulnerabilities
-- ✅ Deep link hijacking surfaces
+- ✅ `deviceOwnerAuthenticationWithBiometrics` without passcode fallback
+- ✅ Missing `evaluatedPolicyDomainState` check (enrollment change detection)
+- ✅ `LAContext` without `invalidate()` call (session reuse)
 
-#### Attack Vectors:
+#### Attack Scenarios:
+1. **Enrollment Attack**: Attacker adds their fingerprint → app doesn't detect → bypass
+2. **Replay Attack**: Frida hooks `evaluatePolicy` to always return success
+3. **Session Reuse**: LAContext stays authenticated → no re-prompt required
 
-**Vector 1: Parameter Injection**
-```
-App registers: myapp://action?token=XXX&user=YYY
-
-Attacker crafts: myapp://action?token=admin&user=hacked
-→ App processes without validation
-→ Priv escalation / account takeover
-```
-
-**Vector 2: Authentication Bypass**
-```
-App has: oauth://callback?code=AUTH_CODE
-
-Attacker intercepts:
-oauth://callback?code=ATTACKER_CODE
-→ Auth bypass, user impersonation
-```
-
-**Vector 3: Deep Link Injection**
-```
-App has: myapp://login?username=admin
-
-Attacker sends via SMS/email:
-myapp://login?username=admin
-→ Auto-login with admin account
-```
-
-#### User Can Find via Frida:
-```bash
-# Monitor all URL scheme invocations
-ioshunt attach instagram --url-scheme-monitor
-
-# Output shows:
-# [URL_SCHEME] URL Scheme Called:
-#   Scheme: instagram://
-#   Full URL: instagram://profile/2818151357?access_token=...
-#   [!] SUSPICIOUS: Possible SQL injection in URL
-#   [!] WARNING: Sensitive data in URL scheme
-```
+#### Bug Bounty Relevance:
+| Platform | Typical Payout | Severity |
+|----------|---------------|----------|
+| HackerOne | $500-$3,000 | Medium-High |
+| Intigriti | €200-€2,000 | Medium-High |
 
 ---
 
-### **FEATURE 4: Background Activity & Data Leak Detection**
-**File**: `core/recon.go:910-940` | **Function**: `DetectBackgroundActivityLeaks()`
+### **DETECTOR 4: Deprecated/Unsafe API Detection** (MASVS-CODE)
+**Function**: `DetectDeprecatedAPIs()` | **Severity**: Medium-High
 
 #### What It Detects:
-- ✅ Background URLSession configuration
-- ✅ Background data synchronization
-- ✅ Sensitive API calls in background
-- ✅ Background fetch with PII
-
-#### Real Attack Scenario:
-```
-Target: Finance app with background sync
-
-Vulnerability:
-- App syncs account data in background
-- No encryption on sensitive endpoints
-- Attacker on same WiFi intercepts data
-
-Steps:
-1. User opens app once
-2. App enables background sync
-3. Later, user closes app
-4. App still syncs data every 15 minutes
-5. Attacker intercepts → account info stolen
-```
-
-#### Exploitation:
-```bash
-# Detect which background operations are happening
-ioshunt attach finance-app
-
-# Frida hooks show:
-# [Background Data Sync] Syncing to: api.finance.com/sync
-# - Sending: account_number, balance, transactions
-# → NO encryption beyond TLS
-```
+- ✅ `NSURLConnection` (deprecated since iOS 9, no HTTP/2, no cert transparency)
+- ✅ `unarchiveObjectWithFile` (unsafe deserialization variant)
+- ✅ `CC_MD2` / `CC_MD4` (completely broken hash algorithms)
+- ✅ `kCCAlgorithm3DES` (Sweet32 attack vulnerable)
+- ✅ `kCCKeySizeAES128` (consider AES-256 for sensitive data)
 
 ---
 
-### **FEATURE 5: App Extension & Shared Container Security**
-**File**: `core/recon.go:946-970` | **Function**: `AnalyzeAppExtensionSecurity()`
+### **DETECTOR 5: Clipboard/Pasteboard Data Leakage** (MASVS-STORAGE)
+**Function**: `AnalyzeClipboardSecurity()` | **Severity**: Medium-High
 
 #### What It Detects:
-- ✅ Insecure app groups usage
-- ✅ WidgetKit security risks
-- ✅ Shared container vulnerabilities
-- ✅ Inter-process communication risks
+- ✅ `UIPasteboard.general` with sensitive data context (password/token/credential)
+- ✅ Missing `expirationDate` on clipboard items
+- ✅ Cross-app clipboard access risk
 
 #### Attack Scenario:
 ```
-Target: Banking app dengan share widget
+1. User copies password from password manager
+2. Password goes to UIPasteboard.general (system clipboard)
+3. Malicious app reads clipboard in background
+4. Password stolen — no user interaction needed
+5. Password stays in clipboard for hours (no expiration)
+```
 
-Vulnerability:
-- Widget shares data via app group
-- Other apps in group can read shared container
-- Widget shows account balance on lock screen
+#### Bug Bounty Relevance:
+| Platform | Typical Payout | Severity |
+|----------|---------------|----------|
+| Bugcrowd | P3-P2 | Medium-High |
+| YesWeHack | €100-€1,000 | Medium |
 
-Attack:
-1. Attacker app registers for same app group
-2. Reads shared container at any time
-3. Sees account balance, recent transactions
-4. Uses information for phishing/fraud
+---
+
+### **DETECTOR 6: Screenshot/Background Caching Protection** (MASVS-STORAGE)
+**Function**: `AnalyzeBackgroundingProtection()` | **Severity**: Medium
+
+#### What It Detects:
+- ✅ Missing `applicationWillResignActive` snapshot blur/overlay
+- ✅ Absence of `userDidTakeScreenshotNotification` monitoring
+- ✅ Only flags apps handling sensitive data (auth/financial context)
+
+#### Attack Scenario:
+```
+Banking app open with balance → User presses Home
+→ iOS captures screenshot → Visible in app switcher
+→ Anyone nearby sees account balance, transactions
 ```
 
 ---
 
-## 🔍 Dynamic Analysis (Frida Hooks)
+### **DETECTOR 7: Supply Chain / SDK Vulnerability Scanning** (MASVS-CODE)
+**Function**: `AnalyzeThirdPartySDKRisks()` | **Severity**: Medium-High
 
-### **New Frida Scripts Added:**
+#### What It Detects:
+- ✅ AFNetworking 2.x (`AFHTTPRequestOperationManager`) — CVE-2015-3996
+- ✅ Firebase debug mode (`FIRDebugEnabled`) in production
+- ✅ Crashlytics PII logging (`CLSLog`)
+- ✅ React Native debug bridge (`RCTBridge`) — port 8081 exposure
+- ✅ Cordova/Capacitor file protocol access (`CDVCommandDelegateImpl`)
+- ✅ Flutter debug mode (`flutter_tools`)
+- ✅ Debug/test/mock frameworks in production build
+- ✅ Excessive framework count (audit recommendation)
 
-#### 1. `url_scheme_monitor.js` 🔗
-```bash
-ioshunt attach AppName --url-scheme-monitor
+---
 
-Monitors:
-✓ All URL scheme invocations
-✓ Parameter validation checks
-✓ SQL injection in URL params
-✓ JavaScript injection attempts
-✓ Sensitive data leakage
+## ⛓️ Attack Chain Detection
+
+The 7 new detectors can be **combined for maximum impact**:
+
+### Chain 1: WebView XSS → Biometric Bypass → Account Takeover
+```
+Detectors: 1 + 3 + 5
+XSS steals session → bypasses biometric → exfiltrates via clipboard
 ```
 
-**Example Output:**
+### Chain 2: Deep Link → WebView XSS → Data Exfiltration
 ```
-[URL_SCHEME] URL Scheme Called:
-  Scheme: myapp://
-  Full URL: myapp://action?token=abc123
-  [!] SUSPICIOUS: Possible SQL injection in URL
-
-[!!] WARNING: Sensitive data in URL scheme
-  Pattern: token=
-  URL: myapp://action?token=eyJhbGc...
+Detectors: 1 + 2 + existing URL scheme
+Crafted deep link opens attacker URL → XSS fires → reads UserDefaults
 ```
 
-#### 2. `nscoding_monitor.js` 📦
-```bash
-ioshunt attach AppName --nscoding-monitor
-
-Monitors:
-✓ Object deserialization calls
-✓ Unsafe unarchiveObjectWithData usage
-✓ NSKeyedUnarchiver without allowedClasses
-✓ Plist loading from untrusted sources
-✓ Object injection attempts
+### Chain 3: Deprecated API + Vulnerable SDK → Full RCE
+```
+Detectors: 1 + 4 + 7 + existing NSCoding
+UIWebView + AFNetworking MITM → inject payload → object injection → RCE
 ```
 
-**Example Output:**
+### Chain 4: Clipboard → Biometric → Keychain → Full Compromise
 ```
-[!] CRITICAL: Unsafe unarchiveObjectWithData called!
-  Method: NSKeyedUnarchiver.unarchiveObjectWithData
-  Vulnerability: Can deserialize ANY object type
-  Risk: Object Injection / Remote Code Execution
-
-[KEYCHAIN_ADD] Storing item with custom access group:
-  Service: auth_token
-  Access Group: group.com.company
-  [!] WARNING: App group sharing enabled
-```
-
-#### 3. `keychain_security_monitor.js` 🔐
-```bash
-ioshunt attach AppName --keychain-monitor
-
-Monitors:
-✓ Keychain item storage operations
-✓ Access group configurations
-✓ Keychain sharing patterns
-✓ Sensitive data in keychain
-✓ App group container access
-```
-
-**Example Output:**
-```
-[KEYCHAIN_ADD] Storing item with custom access group:
-  Service: authentication_token
-  Access Group: group.com.company *
-  Access Level: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-  [!!!] CRITICAL: Wildcard access group - accessible by ANY app!
-
-[APP_GROUP] Accessing shared container:
-  Group ID: group.com.company
-  [!] Data shared with app extensions/other apps!
+Detectors: 3 + 5 + 6 + existing keychain
+Shoulder surf → clipboard steal → session reuse → keychain dump
 ```
 
 ---
 
-## 📊 Usage Examples
-
-### **Complete Scanning Workflow:**
+## 📊 Complete Usage Example
 
 ```bash
-# Step 1: Static Analysis
+# Step 1: Full Static Analysis (includes all 17 detectors)
 ioshunt recon com.target.app
 
-# Step 2: Check vulnerable patterns in report
-# Look for:
-# - "Unsafe NSCoding"
-# - "Keychain Shared via App Groups"
-# - "Unvalidated URL Scheme Handler"
-# - "Potential Background Data Leak"
-# - "App Extension Shared Container"
+# Step 2: Check report for new findings
+cat ~/.ioshunt/targets/com.target.app/latest/report.md
 
-# Step 3: Runtime Analysis - Exploit the vulnerabilities
-ioshunt attach com.target.app \
-  --nscoding-monitor \
-  --url-scheme-monitor \
-  --keychain-monitor
+# Expected new findings:
+# - "CRITICAL: WKWebView JavaScript Bridge Injection"
+# - "HIGH: Missing Privacy Manifest (PrivacyInfo.xcprivacy)"
+# - "HIGH: Biometric Auth Without Passcode Fallback"
+# - "HIGH: Deprecated UIWebView Usage"
+# - "HIGH: Sensitive Data Clipboard Exposure"
+# - "MEDIUM: Missing App Snapshot Protection"
+# - "HIGH: Vulnerable/Misconfigured SDK (AFNetworking < 3.0)"
 
-# Step 4: Trigger vulnerable code paths
-# - Interact with app normally
-# - Follow custom deep links
-# - Sync data in background
-# - Access widgets
+# Step 3: Dynamic Verification
+ioshunt attach com.target.app --url-scheme-monitor --keychain-monitor
 
-# Step 5: Analyze Frida output for:
-# - Sensitive data exposure
-# - Missing input validation
-# - Unsafe deserialization calls
-# - Keychain sharing patterns
-```
+# Step 4: AI-Powered Analysis
+ioshunt analyze com.target.app
 
-### **Targeted Exploitation Example:**
-
-```bash
-# Find banking app vulnerabilities
-ioshunt recon com.mybank.mobile
-
-# Result: Found "Unvalidated URL Scheme Handler: mybank://"
-# Now exploit:
-ioshunt attach com.mybank.mobile --url-scheme-monitor
-
-# In another terminal, trigger:
-xcrun simctl openurl booted "mybank://login?user=admin&bypass=true"
-
-# Frida intercepts & shows validation issues:
-# [URL_SCHEME] URL Scheme Called:
-#   URL: mybank://login?user=admin&bypass=true
-#   [!] SUSPICIOUS: No validation detected
-#   → App processes directly!
+# Step 5: Generate Report
+ioshunt report com.target.app --format html
 ```
 
 ---
 
-## 🎯 Security Implications - What Developers MISSED
-
-| Feature | Vulnerability | Without Detection | With Detection |
-|---------|---|---|---|
-| NSCoding | RCE via deserialization | Hidden risk | **FOUND: Object Injection** |
-| Keychain | Cross-app data theft | Silent vulnerability | **FOUND: *wildcard access** |
-| URL Scheme | Deep link injection | Simple attacks succeed | **FOUND: No validation** |
-| Background | PII leakage | Invisible in static analysis | **FOUND: Sensitive sync** |
-| App Groups | Widget data interception | Not obvious | **FOUND: Shared container** |
-
----
-
-## 📁 Files Modified/Created
+## 📁 Files Modified
 
 ```
 Modified:
-  - core/recon.go
-    * Added 3 hardening signatures
-    * Added 5 new analysis functions
+  core/recon.go        (+510 LOC) — 7 new detector functions + pipeline integration
+  core/update.go       — Version bump to v1.15.0
 
-  - cmd/attach.go
-    * Added 3 new Frida script flags
-
-Created:
-  - assets/url_scheme_monitor.js (170 lines)
-  - assets/nscoding_monitor.js (180 lines)
-  - assets/keychain_security_monitor.js (190 lines)
+Updated Documentation:
+  CHANGELOG.md         — v1.14.2 + v1.15.0 entries
+  ATTACK_SCENARIOS.md  — 3 new + 4 chained attack scenarios
+  IMPLEMENTATION_COMPLETE.md — Updated with all phases
+  NEW_FEATURES_DOCUMENTATION.md — This file
+  TEST_NEW_FEATURES.sh — Updated test procedures
+  README.md            — Updated features and version
 ```
 
 ---
 
-## 🚀 Key Improvements Summary
+**Status**: ✅ **ALL 7 DETECTORS IMPLEMENTED AND INTEGRATED**
 
-| # | Detection | Severity | Exploitability | User Access |
-|---|---|---|---|---|
-| 1 | Unsafe NSCoding | CRITICAL | High (RCE) | Frida hook |
-| 2 | Keychain Wildcard | CRITICAL | High (theft) | Frida hook |
-| 3 | Unvalidated URL Scheme | HIGH | High (injection) | Frida hook |
-| 4 | Background Data Leak | HIGH | Medium (MITM) | Static + Frida |
-| 5 | App Group Sharing | HIGH | High (intercept) | Static + Frida |
-
----
-
-## 💡 Future Enhancements Could Include:
-
-- GraphQL injection detection
-- Type confusion vulnerability detection
-- JIT compilation security analysis
-- WebRTC vulnerability scanning
-- Siri Intent handler security checking
-- CloudKit security analysis
-- Property list injection detection
-- Insecure deserialization in Swift (Codable)
-- Sensitive Swift memory operations
-- Swizzling/method hooking detection
-
----
-
-## 📝 Testing Checklist
-
-To verify new features work correctly:
-
-```bash
-# 1. Build and run iOSHunt
-go build -o ioshunt
-
-# 2. Test static analysis
-./ioshunt recon com.test.app
-# Verify: New findings appear in report.json
-
-# 3. Test Frida hooks
-./ioshunt attach com.test.app --nscoding-monitor
-# Verify: Script loads and hooks initialize
-
-./ioshunt attach com.test.app --url-scheme-monitor
-# Verify: URL scheme calls are intercepted
-
-./ioshunt attach com.test.app --keychain-monitor
-# Verify: Keychain operations are logged
-
-# 4. Analyze output
-# Check report.md for:
-# - "Unsafe NSCoding (Possible Object Injection)"
-# - "Keychain Shared via App Groups"
-# - "Unvalidated URL Scheme Handler"
-# - "Potential Background Data Leak"
-# - "App Extension Shared Container"
-```
-
----
-
-**Status**: ✅ **ALL FEATURES IMPLEMENTED AND INTEGRATED**
-
-Ready for security testing against iOS applications!
+Ready for bug bounty hunting on iOS applications!

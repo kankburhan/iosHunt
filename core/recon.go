@@ -230,6 +230,13 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 		// Feature 3: Logging data leaks (credentials in log statements)
 		AnalyzeLoggingStatements(binaryPath, target)
 
+		// BUG BOUNTY PHASE 2: 7 New Detectors (HackerOne/Bugcrowd/YesWeHack/Intigriti research)
+		AnalyzeWebViewSecurity(binaryPath, target)          // MASVS-PLATFORM: WebView XSS & JS injection
+		AnalyzeBiometricAuth(binaryPath, target)            // MASVS-AUTH: Biometric bypass detection
+		DetectDeprecatedAPIs(binaryPath, target)            // MASVS-CODE: Deprecated/unsafe API usage
+		AnalyzeClipboardSecurity(binaryPath, target)        // MASVS-STORAGE: Clipboard data leakage
+		AnalyzeBackgroundingProtection(binaryPath, target)  // MASVS-STORAGE: Screenshot/snapshot protection
+
 		// Call scanHardeningSignatures for binary content
 		if content, err := os.ReadFile(binaryPath); err == nil {
 			scanHardeningSignatures(string(content), binaryPath, target)
@@ -346,6 +353,10 @@ func StaticAnalyze(target *Target, externalPatterns map[string]*regexp.Regexp) e
 	} else if len(target.Report.Findings.DataFlows) > 0 {
 		fmt.Printf("[+] Found %d data flow paths\n", len(target.Report.Findings.DataFlows))
 	}
+
+	// BUG BOUNTY PHASE 2: Target-level analysis (not binary-specific)
+	AnalyzePrivacyManifest(target)       // MASVS-PLATFORM: Apple Privacy Manifest compliance
+	AnalyzeThirdPartySDKRisks(target)    // MASVS-CODE: Supply chain SDK vulnerability scanning
 
 	if err != nil {
 		return err
@@ -1678,4 +1689,510 @@ func disablePFS(sMap map[string]interface{}) bool {
 		return true
 	}
 	return false
+}
+
+// ============================================
+// BUG BOUNTY PHASE 2: 7 New Vulnerability Detectors
+// Based on HackerOne, Bugcrowd, YesWeHack, Intigriti research
+// OWASP MASVS 2024-2025 mapped
+// ============================================
+
+// AnalyzeWebViewSecurity detects WebView XSS & injection vulnerabilities (MASVS-PLATFORM)
+func AnalyzeWebViewSecurity(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	// Skip SDK code
+	if isThirdPartyFile(baseName) {
+		return
+	}
+
+	// Pattern 1: WKWebView with JavaScript enabled + evaluateJavaScript (JS bridge injection)
+	if strings.Contains(data, "WKWebView") && strings.Contains(data, "evaluateJavaScript") {
+		hasInputSanitization := strings.Contains(data, "sanitize") ||
+			strings.Contains(data, "escapeHTML") ||
+			strings.Contains(data, "WKContentRuleList") ||
+			strings.Contains(data, "encodeURIComponent")
+
+		if !hasInputSanitization {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:           "CRITICAL: WKWebView JavaScript Bridge Injection",
+				Severity:        "Critical",
+				Description:     "WKWebView uses evaluateJavaScript without input sanitization. Attacker-controlled data injected into JS context can execute arbitrary JavaScript, steal cookies, access native bridges, or exfiltrate data.",
+				FilePath:        baseName,
+				LineNumber:      0,
+				Snippet:         "WKWebView + evaluateJavaScript without sanitization = XSS/JS injection",
+				ExploitScenario: "Attacker injects malicious JS via deep link/API response → WKWebView evaluates it → steals session tokens via document.cookie or calls native bridge functions.",
+				Recommendation:  "Sanitize all dynamic content before evaluateJavaScript. Implement WKContentRuleList for CSP. Use WKScriptMessageHandler with strict validation.",
+			})
+		}
+	}
+
+	// Pattern 2: loadHTMLString with dynamic content (stored XSS)
+	if strings.Contains(data, "loadHTMLString") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "HIGH: WebView loadHTMLString (Potential Stored XSS)",
+			Severity:        "High",
+			Description:     "App loads dynamic HTML content into WebView via loadHTMLString. If content includes unsanitized user input or API responses, stored XSS is possible.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "loadHTMLString detected — verify HTML content is sanitized before rendering",
+			ExploitScenario: "Attacker injects <script>alert(document.cookie)</script> via chat message/profile field → app renders in WebView → XSS executes, steals session.",
+			Recommendation:  "Sanitize HTML content before loading. Use DOMPurify or equivalent. Set strict baseURL to prevent file:// access.",
+		})
+	}
+
+	// Pattern 3: WKScriptMessageHandler without validation
+	if strings.Contains(data, "WKScriptMessageHandler") && strings.Contains(data, "userContentController") {
+		if !strings.Contains(data, "validateMessage") && !strings.Contains(data, "allowedOrigins") {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:           "HIGH: Unvalidated WKScriptMessageHandler (Native Bridge Abuse)",
+				Severity:        "High",
+				Description:     "WKScriptMessageHandler exposes native functions to JavaScript without origin/message validation. Malicious JS can call native functions to access device features, files, or keychain.",
+				FilePath:        baseName,
+				LineNumber:      0,
+				Snippet:         "WKScriptMessageHandler + userContentController without validation",
+				ExploitScenario: "XSS in WebView → JS calls window.webkit.messageHandlers.nativeBridge.postMessage({action:'readKeychain'}) → native code executes without checking origin.",
+				Recommendation:  "Validate message origin and content in userContentController:didReceiveScriptMessage:. Whitelist allowed actions. Never expose sensitive native APIs to JS bridge.",
+			})
+		}
+	}
+
+	// Pattern 4: UIWebView (deprecated, no process isolation)
+	if strings.Contains(data, "UIWebView") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "HIGH: Deprecated UIWebView Usage",
+			Severity:        "High",
+			Description:     "App uses deprecated UIWebView which lacks process isolation, has no JavaScript control, and is vulnerable to multiple known attacks. Apple rejects new submissions with UIWebView since iOS 12.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "UIWebView detected — deprecated, insecure, no process isolation",
+			ExploitScenario: "UIWebView runs in the app's process. XSS can access full app memory, bypass Same-Origin Policy with empty baseURL, read local files via file:// URLs.",
+			Recommendation:  "Migrate to WKWebView immediately. UIWebView has no security controls and Apple will reject apps using it.",
+		})
+	}
+}
+
+// AnalyzePrivacyManifest checks for Apple Privacy Manifest compliance (MASVS-PLATFORM)
+func AnalyzePrivacyManifest(target *Target) {
+	// Check for PrivacyInfo.xcprivacy in app bundle
+	hasPrivacyManifest := false
+	usesRequiredReasonAPIs := false
+	requiredAPIsFound := []string{}
+
+	err := filepath.Walk(target.AppPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.Name() == "PrivacyInfo.xcprivacy" {
+			hasPrivacyManifest = true
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+
+	// Check if binary uses Required Reason APIs
+	if target.BinaryPath != "" {
+		content, err := os.ReadFile(target.BinaryPath)
+		if err == nil {
+			data := string(content)
+
+			requiredReasonAPIs := map[string]string{
+				"NSUserDefaults":          "User Defaults API (fingerprinting risk)",
+				"mach_absolute_time":      "System Boot Time API (device fingerprinting)",
+				"systemUptime":            "System Uptime API (device fingerprinting)",
+				"creationDate":            "File Timestamp API (fingerprinting risk)",
+				"modificationDate":        "File Timestamp API (fingerprinting risk)",
+				"fstat":                   "File Stat API (disk space fingerprinting)",
+				"activeInputModes":        "Active Keyboard API (user profiling)",
+				"UserDefaults.standard":   "UserDefaults Standard API (fingerprinting)",
+			}
+
+			for api, desc := range requiredReasonAPIs {
+				if strings.Contains(data, api) {
+					usesRequiredReasonAPIs = true
+					requiredAPIsFound = append(requiredAPIsFound, fmt.Sprintf("%s (%s)", api, desc))
+				}
+			}
+		}
+	}
+
+	// Report findings
+	if !hasPrivacyManifest && usesRequiredReasonAPIs {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "HIGH: Missing Privacy Manifest (PrivacyInfo.xcprivacy)",
+			Severity:        "High",
+			Description:     fmt.Sprintf("App uses Required Reason APIs without a Privacy Manifest file. Since May 2024, Apple requires PrivacyInfo.xcprivacy for apps using these APIs. Found APIs: %s", strings.Join(requiredAPIsFound, ", ")),
+			FilePath:        "App Bundle",
+			LineNumber:      0,
+			Snippet:         "No PrivacyInfo.xcprivacy found but Required Reason APIs detected",
+			ExploitScenario: "Without a privacy manifest, the app may be rejected from the App Store. The APIs can also be used for device fingerprinting across apps, violating user privacy.",
+			Recommendation:  "Create PrivacyInfo.xcprivacy in Xcode (File > New > App Privacy). Declare all Required Reason API usage with approved reason codes.",
+		})
+	} else if !hasPrivacyManifest {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"MEDIUM: No PrivacyInfo.xcprivacy found — Apple requires this for App Store submissions since May 2024")
+	}
+}
+
+// AnalyzeBiometricAuth detects biometric authentication bypass vulnerabilities (MASVS-AUTH)
+func AnalyzeBiometricAuth(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	if isThirdPartyFile(baseName) {
+		return
+	}
+
+	// Only analyze if app uses biometric authentication
+	if !strings.Contains(data, "LAContext") && !strings.Contains(data, "LocalAuthentication") {
+		return
+	}
+
+	// Pattern 1: BiometricOnly without device passcode fallback
+	if strings.Contains(data, "deviceOwnerAuthenticationWithBiometrics") &&
+		!strings.Contains(data, "deviceOwnerAuthentication") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "HIGH: Biometric Auth Without Passcode Fallback",
+			Severity:        "High",
+			Description:     "App uses deviceOwnerAuthenticationWithBiometrics (biometrics only) instead of deviceOwnerAuthentication (biometrics + passcode). If biometrics fail 5 times, authentication is permanently locked without fallback.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "LAPolicy.deviceOwnerAuthenticationWithBiometrics — no passcode fallback",
+			ExploitScenario: "Attacker triggers 5 failed biometric attempts → biometric auth is locked → no fallback mechanism → user locked out or attacker bypasses with Frida hook on evaluatePolicy.",
+			Recommendation:  "Use .deviceOwnerAuthentication policy which falls back to device passcode. For sensitive operations, combine with server-side verification.",
+		})
+	}
+
+	// Pattern 2: Missing evaluatedPolicyDomainState check (biometric replay)
+	if strings.Contains(data, "evaluatePolicy") && !strings.Contains(data, "evaluatedPolicyDomainState") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "MEDIUM: Missing Biometric Change Detection",
+			Severity:        "Medium",
+			Description:     "App calls evaluatePolicy without checking evaluatedPolicyDomainState. This means the app cannot detect if new fingerprints/faces were enrolled after the initial setup, allowing an attacker who adds their biometric to bypass authentication.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "evaluatePolicy without evaluatedPolicyDomainState check",
+			ExploitScenario: "Attacker with device access enrolls their fingerprint → app doesn't detect the change → attacker authenticates with their own biometric → full access to protected features.",
+			Recommendation:  "Store evaluatedPolicyDomainState after initial enrollment. Compare on each auth attempt. If changed, require re-authentication with password.",
+		})
+	}
+
+	// Pattern 3: LAContext without invalidate (context reuse)
+	if strings.Contains(data, "LAContext") && !strings.Contains(data, "invalidate") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "MEDIUM: LAContext Not Invalidated (Session Reuse Risk)",
+			Severity:        "Medium",
+			Description:     "LAContext is never invalidated after use. An authenticated context can be reused to bypass subsequent biometric prompts within the same session.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "LAContext created but never invalidated — session reuse possible",
+			ExploitScenario: "Frida hooks evaluatePolicy to always return success. Without invalidation, the context remains authenticated for the app's lifetime.",
+			Recommendation:  "Call context.invalidate() after each authentication. Create a new LAContext for each auth attempt.",
+		})
+	}
+}
+
+// DetectDeprecatedAPIs checks for usage of deprecated/unsafe APIs (MASVS-CODE)
+func DetectDeprecatedAPIs(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	if isThirdPartyFile(baseName) {
+		return
+	}
+
+	deprecatedAPIs := []struct {
+		pattern     string
+		title       string
+		severity    string
+		description string
+		recommend   string
+	}{
+		{
+			"NSURLConnection",
+			"MEDIUM: Deprecated NSURLConnection Usage",
+			"Medium",
+			"App uses deprecated NSURLConnection which lacks modern security features (HTTP/2, certificate transparency, modern TLS). Replaced by NSURLSession since iOS 9.",
+			"Migrate to NSURLSession for modern TLS support, certificate transparency, and HTTP/2.",
+		},
+		{
+			"unarchiveObjectWithFile",
+			"HIGH: Deprecated unarchiveObjectWithFile (Insecure Deserialization)",
+			"High",
+			"App uses deprecated unarchiveObjectWithFile which deserializes objects without class restriction. Any object type can be instantiated during deserialization.",
+			"Use NSKeyedUnarchiver.unarchivedObject(ofClass:from:) with explicit allowed class list.",
+		},
+		{
+			"CC_MD2",
+			"MEDIUM: Broken Hash Algorithm (MD2)",
+			"Medium",
+			"App uses MD2 hash algorithm which is completely broken. Collisions can be generated trivially.",
+			"Use SHA-256 or SHA-3 for hashing. Use PBKDF2/bcrypt/scrypt for password hashing.",
+		},
+		{
+			"CC_MD4",
+			"MEDIUM: Broken Hash Algorithm (MD4)",
+			"Medium",
+			"App uses MD4 hash algorithm which is completely broken and exploitable in seconds.",
+			"Use SHA-256 or SHA-3 for hashing. Use PBKDF2/bcrypt/scrypt for password hashing.",
+		},
+		{
+			"kCCAlgorithm3DES",
+			"MEDIUM: Weak Encryption Algorithm (3DES)",
+			"Medium",
+			"App uses Triple DES (3DES) which has an effective key length of 112 bits and is vulnerable to Sweet32 birthday attacks on long-lived connections.",
+			"Migrate to AES-256-GCM for symmetric encryption.",
+		},
+		{
+			"kCCKeySizeAES128",
+			"MEDIUM: AES-128 Key Size (Consider AES-256)",
+			"Medium",
+			"App uses AES with 128-bit key size. While not broken, AES-256 provides stronger security margin for sensitive data.",
+			"Use kCCKeySizeAES256 for sensitive data encryption.",
+		},
+	}
+
+	for _, api := range deprecatedAPIs {
+		if strings.Contains(data, api.pattern) {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:          api.title,
+				Severity:       api.severity,
+				Description:    api.description,
+				FilePath:       baseName,
+				LineNumber:     0,
+				Snippet:        fmt.Sprintf("Detected: %s", api.pattern),
+				Recommendation: api.recommend,
+			})
+		}
+	}
+}
+
+// AnalyzeClipboardSecurity detects clipboard/pasteboard data leakage (MASVS-STORAGE)
+func AnalyzeClipboardSecurity(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	if isThirdPartyFile(baseName) {
+		return
+	}
+
+	if !strings.Contains(data, "UIPasteboard") {
+		return
+	}
+
+	// Pattern 1: UIPasteboard.general with sensitive data context
+	sensitiveContexts := []string{"password", "token", "secret", "credential", "apiKey", "api_key", "cardNumber", "cvv", "ssn"}
+	for _, ctx := range sensitiveContexts {
+		if strings.Contains(data, ctx) && strings.Contains(data, "UIPasteboard") {
+			target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+				Title:           "HIGH: Sensitive Data Clipboard Exposure",
+				Severity:        "High",
+				Description:     fmt.Sprintf("App uses UIPasteboard in context with sensitive data (%s). Any app on the device can read the system clipboard, exposing credentials or tokens.", ctx),
+				FilePath:        baseName,
+				LineNumber:      0,
+				Snippet:         fmt.Sprintf("UIPasteboard + %s context — clipboard accessible by all apps", ctx),
+				ExploitScenario: "User copies password/token → data goes to UIPasteboard.general → malicious app reads clipboard in background → credential stolen.",
+				Recommendation:  "Never copy sensitive data to clipboard. If unavoidable, use UIPasteboard.withUniqueName() with expirationDate. Set localOnly=true to prevent Handoff.",
+			})
+			break // One finding is enough
+		}
+	}
+
+	// Pattern 2: No expiration on pasteboard items
+	if strings.Contains(data, "UIPasteboard.general") && !strings.Contains(data, "expirationDate") {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "MEDIUM: Clipboard Data Without Expiration",
+			Severity:        "Medium",
+			Description:     "App writes to system clipboard without setting expiration. Data persists indefinitely and can be read by any app at any time.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "UIPasteboard.general without expirationDate",
+			ExploitScenario: "User copies data → closes app → hours later another app reads clipboard → data still available.",
+			Recommendation:  "Use setItems(_:options:) with .expirationDate to auto-expire clipboard data. Set localOnly to prevent cross-device sync.",
+		})
+	}
+}
+
+// AnalyzeBackgroundingProtection checks for screenshot/background caching protection (MASVS-STORAGE)
+func AnalyzeBackgroundingProtection(binaryPath string, target *Target) {
+	content, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return
+	}
+	data := string(content)
+	baseName := filepath.Base(binaryPath)
+
+	if isThirdPartyFile(baseName) {
+		return
+	}
+
+	// Check if app handles sensitive data (has auth/financial context)
+	handlesSensitiveData := false
+	sensitiveIndicators := []string{"password", "token", "balance", "account", "payment", "credit", "transaction", "SSN", "credential"}
+	for _, indicator := range sensitiveIndicators {
+		if strings.Contains(strings.ToLower(data), strings.ToLower(indicator)) {
+			handlesSensitiveData = true
+			break
+		}
+	}
+
+	if !handlesSensitiveData {
+		return
+	}
+
+	// Pattern 1: Missing applicationWillResignActive snapshot protection
+	hasSnapshotProtection := strings.Contains(data, "applicationWillResignActive") ||
+		strings.Contains(data, "sceneWillResignActive") ||
+		strings.Contains(data, "UIApplicationWillResignActiveNotification")
+
+	hasBlurOverlay := strings.Contains(data, "UIVisualEffectView") ||
+		strings.Contains(data, "UIBlurEffect") ||
+		strings.Contains(data, "addSubview") // Generic but combined with resign check
+
+	if !hasSnapshotProtection || !hasBlurOverlay {
+		target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+			Title:           "MEDIUM: Missing App Snapshot Protection",
+			Severity:        "Medium",
+			Description:     "App handles sensitive data but lacks screenshot/snapshot protection on backgrounding. iOS captures a screenshot when app enters background, visible in app switcher.",
+			FilePath:        baseName,
+			LineNumber:      0,
+			Snippet:         "No blur/overlay on applicationWillResignActive — sensitive data visible in app switcher",
+			ExploitScenario: "User has banking app open with balance visible → presses Home → iOS takes snapshot → anyone who double-taps Home sees account balance in app switcher preview.",
+			Recommendation:  "Add UIVisualEffectView blur overlay in applicationWillResignActive/sceneWillResignActive. Remove overlay in applicationDidBecomeActive.",
+		})
+	}
+
+	// Pattern 2: Missing screenshot prevention notification
+	if !strings.Contains(data, "userDidTakeScreenshotNotification") {
+		target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+			"MEDIUM: No screenshot detection — app doesn't monitor UIApplication.userDidTakeScreenshotNotification for sensitive screens")
+	}
+}
+
+// AnalyzeThirdPartySDKRisks detects supply chain and SDK vulnerability risks (MASVS-CODE)
+func AnalyzeThirdPartySDKRisks(target *Target) {
+	// Known vulnerable SDK patterns with CVE references
+	vulnerableSDKs := []struct {
+		name        string
+		pattern     string
+		severity    string
+		description string
+		cve         string
+	}{
+		{
+			"AFNetworking (< 3.0)",
+			"AFHTTPRequestOperationManager",
+			"High",
+			"Detects usage of AFHTTPRequestOperationManager (AFNetworking 2.x). This version has known SSL validation bypass vulnerabilities.",
+			"CVE-2015-3996",
+		},
+		{
+			"Firebase (Debug Mode)",
+			"FIRDebugEnabled",
+			"Medium",
+			"Firebase debug mode is enabled in production build. Debug mode logs sensitive analytics data and may expose internal endpoints.",
+			"",
+		},
+		{
+			"Crashlytics (PII Logging)",
+			"CLSLog",
+			"Medium",
+			"Crashlytics CLSLog may capture user PII in crash reports sent to third-party servers.",
+			"",
+		},
+		{
+			"React Native (Debug Bridge)",
+			"RCTBridge",
+			"High",
+			"React Native bridge detected. If dev mode is enabled, the bridge exposes remote JS debugging (port 8081) allowing arbitrary code injection.",
+			"",
+		},
+		{
+			"Cordova/Capacitor (File Protocol)",
+			"CDVCommandDelegateImpl",
+			"Medium",
+			"Cordova/Capacitor hybrid framework detected. These frameworks commonly allow file:// protocol access in WebView, enabling local file read attacks.",
+			"",
+		},
+		{
+			"Flutter (Debug Mode)",
+			"flutter_tools",
+			"Medium",
+			"Flutter debug artifacts detected in production build. Debug mode enables Dart Observatory (remote debugging) and performance profiling.",
+			"",
+		},
+	}
+
+	// Scan binary for vulnerable SDK patterns
+	if target.BinaryPath != "" {
+		content, err := os.ReadFile(target.BinaryPath)
+		if err == nil {
+			data := ExtractStrings(content)
+
+			for _, sdk := range vulnerableSDKs {
+				if strings.Contains(data, sdk.pattern) {
+					desc := sdk.description
+					if sdk.cve != "" {
+						desc += fmt.Sprintf(" Reference: %s", sdk.cve)
+					}
+					target.Report.Findings.CodeIssues = append(target.Report.Findings.CodeIssues, Finding{
+						Title:          fmt.Sprintf("%s: Vulnerable/Misconfigured SDK (%s)", sdk.severity, sdk.name),
+						Severity:       sdk.severity,
+						Description:    desc,
+						FilePath:       filepath.Base(target.BinaryPath),
+						LineNumber:     0,
+						Snippet:        fmt.Sprintf("Detected pattern: %s", sdk.pattern),
+						Recommendation: "Update SDK to latest version. Remove debug flags from production builds. Audit third-party SDK data collection practices.",
+					})
+				}
+			}
+		}
+	}
+
+	// Scan embedded frameworks for outdated versions
+	frameworksPath := filepath.Join(target.AppPath, "Frameworks")
+	if _, err := os.Stat(frameworksPath); err == nil {
+		entries, _ := os.ReadDir(frameworksPath)
+		debugFrameworks := []string{}
+		for _, entry := range entries {
+			name := entry.Name()
+			// Flag debug/test frameworks in production
+			lowerName := strings.ToLower(name)
+			if strings.Contains(lowerName, "debug") ||
+				strings.Contains(lowerName, "test") ||
+				strings.Contains(lowerName, "mock") {
+				debugFrameworks = append(debugFrameworks, name)
+			}
+		}
+
+		if len(debugFrameworks) > 0 {
+			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+				fmt.Sprintf("MEDIUM: Debug/Test frameworks found in production build: %s — remove before release", strings.Join(debugFrameworks, ", ")))
+		}
+
+		// Report total framework count for audit
+		if len(entries) > 15 {
+			target.Report.Findings.Misconfigurations = append(target.Report.Findings.Misconfigurations,
+				fmt.Sprintf("INFO: Large number of embedded frameworks (%d) — audit each for security updates and privacy compliance", len(entries)))
+		}
+	}
 }
