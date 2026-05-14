@@ -49,18 +49,9 @@ func AttachToApp(bundleIDOrName string, scriptPaths ...string) error {
 	return nil
 }
 
-// GetAssetScript returns the path to the internal script
+// GetAssetScript returns the path to the internal script by extracting it from the embedded filesystem
 func GetAssetScript(scriptName string) (string, error) {
-	// For development, we look in assets/ relative to pwd.
-	// For production/binary, we might need embedded assets.
-	// Assuming pwd for now.
-
-	cwd, _ := os.Getwd()
-	path := filepath.Join(cwd, "assets", scriptName)
-	if _, err := os.Stat(path); err != nil {
-		return "", err
-	}
-	return path, nil
+	return ExtractAsset(scriptName)
 }
 
 // GetPluginScript returns the path to a plugin script

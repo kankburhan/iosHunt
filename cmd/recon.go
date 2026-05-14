@@ -121,22 +121,9 @@ like URLs, API keys, emails, and IP addresses.`,
 		if ghidraPath != "" {
 			fmt.Printf("[*] Ghidra path provided. Starting Advanced Static Analysis...\n")
 
-			// Locate script (assuming existing in assets/ for dev)
-			// in prod, we might need to look relative to binary or embedded
-			cwd, _ := os.Getwd()
-			scriptPath := filepath.Join(cwd, "assets", core.GHIDRA_SCRIPT)
-
-			// If not found, check if it's in the same dir as binary (deployment)
-			if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-				// Try looking in executable dir
-				ex, err := os.Executable()
-				if err == nil {
-					scriptPath = filepath.Join(filepath.Dir(ex), "assets", core.GHIDRA_SCRIPT)
-				}
-			}
-
-			if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-				fmt.Printf("[!] Could not locate Ghidra script %s. Skipping Ghidra analysis.\n", core.GHIDRA_SCRIPT)
+			scriptPath, err := core.ExtractAsset(core.GHIDRA_SCRIPT)
+			if err != nil {
+				fmt.Printf("[!] Could not extract Ghidra script %s: %v. Skipping Ghidra analysis.\n", core.GHIDRA_SCRIPT, err)
 			} else {
 				findings, err := core.RunGhidraAnalysis(target.BinaryPath, ghidraPath, scriptPath)
 				if err != nil {

@@ -359,7 +359,6 @@ func (dfa *DataFlowAnalyzer) CalculateFlowConfidenceStringBased(
 		finalScore = 1.0
 	}
 
-	confidence.FinalScore = finalScore
 	return finalScore
 }
 
@@ -525,7 +524,6 @@ func (dfa *DataFlowAnalyzer) CalculateFlowConfidenceBinaryLevel(
 		finalScore = 1.0
 	}
 
-	confidence.FinalScore = finalScore
 	return finalScore
 }
 
@@ -542,9 +540,10 @@ func (dfa *DataFlowAnalyzer) CalculateSeverity() {
 
 		// Adjust severity based on confidence
 		if path.Confidence < 0.50 {
-			if path.Severity == "CRITICAL" {
+			switch path.Severity {
+			case "CRITICAL":
 				path.Severity = "HIGH"
-			} else if path.Severity == "HIGH" {
+			case "HIGH":
 				path.Severity = "MEDIUM"
 			}
 		}
@@ -822,7 +821,7 @@ func extractVariableName(title string) string {
 	return ""
 }
 
-func hasSensitiveKeywordMatch(source, sink string) bool {
+func hasSensitiveKeywordMatch(_, sink string) bool {
 	keywords := []string{
 		"password", "token", "secret", "key", "api",
 		"credential", "bearer", "auth", "session",

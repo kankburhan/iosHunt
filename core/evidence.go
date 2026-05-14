@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -229,13 +228,3 @@ func (ec *EvidenceCollector) AttachToFinding(f *Finding, evType, path, descripti
 	})
 }
 
-// summarizeEvidence is a debug helper
-func (ec *EvidenceCollector) summarizeEvidence() string {
-	files, _ := filepath.Glob(filepath.Join(ec.OutputDir, "*", "*"))
-	var b strings.Builder
-	fmt.Fprintf(&b, "Evidence session: %s (%d artifacts)\n", ec.SessionID, len(files))
-	for _, f := range files {
-		fmt.Fprintf(&b, "  - %s\n", f)
-	}
-	return b.String()
-}

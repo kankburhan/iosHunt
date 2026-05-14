@@ -631,9 +631,6 @@ func extractContext(lines []string, start int, fullData string) (int, string) {
 	return lineNo, ""
 }
 
-func hasString(content []byte, sub string) bool {
-	return strings.Contains(string(content), sub)
-}
 
 func deduplicate(slice []string) []string {
 	keys := make(map[string]bool)

@@ -915,7 +915,7 @@ func (s *MCPServer) toolDumpRuntime(args json.RawMessage) mcpToolResult {
 	))
 }
 
-func (s *MCPServer) toolCheckDevice(args json.RawMessage) mcpToolResult {
+func (s *MCPServer) toolCheckDevice(_ json.RawMessage) mcpToolResult {
 	device, err := GetConnectedDevice()
 	if err != nil {
 		return mcpSuccess(fmt.Sprintf("No iOS device detected: %v\n\nMake sure:\n1. Device is connected via USB\n2. Frida is installed on the device\n3. frida-server is running", err))
@@ -1025,7 +1025,7 @@ func (s *MCPServer) toolInstallApp(args json.RawMessage) mcpToolResult {
 	))
 }
 
-func (s *MCPServer) toolPentestStatus(args json.RawMessage) mcpToolResult {
+func (s *MCPServer) toolPentestStatus(_ json.RawMessage) mcpToolResult {
 	status := map[string]interface{}{
 		"phase":     s.session.Phase,
 		"bundle_id": s.session.BundleID,
@@ -1297,7 +1297,7 @@ func buildReconSummary(report *Report) string {
 
 	// Findings Summary
 	sb.WriteString("## Findings Summary\n")
-	sb.WriteString(fmt.Sprintf("| Category | Count |\n|---|---|\n"))
+	sb.WriteString("| Category | Count |\n|---|---|\n")
 	sb.WriteString(fmt.Sprintf("| Secrets | %d |\n", len(report.Findings.Secrets)))
 	sb.WriteString(fmt.Sprintf("| Misconfigurations | %d |\n", len(report.Findings.Misconfigurations)))
 	sb.WriteString(fmt.Sprintf("| Crypto Issues | %d |\n", len(report.Findings.CryptoIssues)))
@@ -1704,7 +1704,7 @@ func searchInApp(appPath, pattern, fileFilter string) []map[string]string {
 }
 
 // verifyExploitability runs targeted verification checks
-func verifyExploitability(findingType, value, context string) string {
+func verifyExploitability(findingType, value, _ string) string {
 	var sb strings.Builder
 
 	switch findingType {
